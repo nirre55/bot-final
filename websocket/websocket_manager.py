@@ -26,6 +26,7 @@ class WebSocketManager:
         self.message_handler = message_handler
         self.reconnection_attempts: int = 0
         self.is_running: bool = True
+        self.websocket: Optional[Any] = None
         
         self.logger.debug("WebSocketManager initialisé")
     
@@ -129,8 +130,18 @@ class WebSocketManager:
         
         while self.is_running:
             try:
+                # Vérification rapide de is_running avant chaque opération bloquante
+                if not self.is_running:
+                    self.logger.info("Arrêt demandé - fermeture de la connexion WebSocket")
+                    break
+                    
                 data = await self._receive_websocket_data(websocket)
                 message_data = json.loads(data)
+                
+                # Vérifier à nouveau is_running après avoir reçu les données
+                if not self.is_running:
+                    self.logger.info("Arrêt demandé pendant le traitement - arrêt de la boucle")
+                    break
                 
                 # Traiter le message via le handler fourni
                 self.message_handler(message_data)
@@ -140,11 +151,16 @@ class WebSocketManager:
 
             except websockets.exceptions.ConnectionClosed:
                 self.logger.warning("Connexion WebSocket fermée")
-                print("\n[ERREUR] Connexion WebSocket fermée")
+                if self.is_running:
+                    print("\n[ERREUR] Connexion WebSocket fermée")
                 raise
+            except asyncio.CancelledError:
+                self.logger.info("Opération WebSocket annulée")
+                break
             except Exception as e:
                 self.logger.error(f"Erreur WebSocket: {e}", exc_info=True)
-                print(f"\nErreur WebSocket: {e}")
+                if self.is_running:
+                    print(f"\nErreur WebSocket: {e}")
                 raise
 
     async def _single_websocket_connection(self, uri: str) -> None:
@@ -158,6 +174,7 @@ class WebSocketManager:
         self._log_connection_attempt(uri)
         
         async with websockets.connect(uri) as websocket:
+            self.websocket = websocket
             self._log_connection_success()
             await self._handle_websocket_connection(websocket)
 
@@ -202,3 +219,11 @@ class WebSocketManager:
         """Arrête le gestionnaire WebSocket"""
         self.logger.info("Arrêt du gestionnaire WebSocket demandé")
         self.is_running = False
+        
+        # Fermer explicitement la connexion WebSocket si elle existe
+        if self.websocket:
+            try:
+                self.logger.info("Fermeture explicite de la connexion WebSocket")
+                asyncio.create_task(self.websocket.close())
+            except Exception as e:
+                self.logger.warning(f"Erreur lors de la fermeture WebSocket: {e}")

@@ -12,7 +12,7 @@ This is a Python-based **Binance futures trading bot** that connects to real-tim
 The bot follows a **layered architecture** where each component has a single responsibility:
 
 - **`trading_bot.py`**: Main orchestrator that coordinates all services and handles WebSocket message processing
-- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService)  
+- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService)  
 - **Indicator Layer** (`indicators/`): Pure calculation logic (RSI, Heikin Ashi)
 - **API Layer** (`api/`): External service communication (Binance REST API, market data)
 - **WebSocket Layer** (`websocket/`): Real-time data streaming with auto-reconnection
@@ -23,6 +23,7 @@ The bot triggers calculations **only on candle close events** detected through W
 2. On candle close → `_calculate_and_display_rsi()` 
 3. RSI calculation → `_calculate_and_display_ha()`
 4. Display both RSI values and HA candle color with emojis
+5. Process signal detection → `_process_signal_detection()`
 
 ## Common Commands
 
@@ -48,9 +49,9 @@ python trading_bot.py
 
 ### RSI Configuration
 The bot calculates **multiple RSI periods** with different sensitivity thresholds:
-- RSI 5: 10/90 (highly sensitive)
-- RSI 14: 20/80 (standard)  
-- RSI 21: 30/70 (less sensitive)
+- RSI 3: 10/90 (highly sensitive)
+- RSI 5: 20/80 (standard)  
+- RSI 7: 30/70 (less sensitive)
 
 ### Data Requirements
 - **RSI calculations**: Requires 100 historical candles
@@ -79,6 +80,26 @@ Each RSI period has different thresholds for oversold/overbought detection confi
 - **Green 🟢**: Bullish HA candle (HA_close > HA_open)
 - **Red 🔴**: Bearish HA candle (HA_close < HA_open)  
 - **White ⚪**: Doji HA candle (HA_close = HA_open)
+
+## Trading Signal System
+
+### 2-Step Sequential Signal Logic
+The bot implements a **sequential signal detection system** requiring two distinct phases:
+
+**Step 1: RSI Condition**
+- **LONG Signal**: All 3 RSI periods (3, 5, 7) must be **OVERSOLD** simultaneously
+- **SHORT Signal**: All 3 RSI periods (3, 5, 7) must be **OVERBOUGHT** simultaneously
+
+**Step 2: HA Confirmation** (after RSI condition is met)
+- **LONG Confirmation**: Green HA candle after RSI oversold
+- **SHORT Confirmation**: Red HA candle after RSI overbought
+
+### Signal State Machine
+- **WAITING**: Monitoring for RSI conditions
+- **RSI_CONDITION_MET**: RSI satisfied, waiting for HA confirmation
+- **SIGNAL_CONFIRMED**: Complete signal validated and ready for trading
+
+**Important**: The two steps must be **sequential**, not simultaneous. Once HA confirmation is received, the signal remains valid even if RSI values exit oversold/overbought zones.
 
 ## Architecture Principles
 

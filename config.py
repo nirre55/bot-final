@@ -27,9 +27,9 @@ RECONNECTION_CONFIG: Dict[str, Any] = {
 # Configuration détection de signaux de trading
 SIGNAL_CONFIG: Dict[str, Dict[int, Dict[str, int]]] = {
     "RSI_THRESHOLDS": {
-        5: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 5: plus sensible
-        14: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 14: standard
-        21: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 21: moins sensible
+        3: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
+        5: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
+        7: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
     }
 }
 
@@ -47,5 +47,5 @@ LOGGING_CONFIG: Dict[str, Any] = {
     },
     "CONSOLE_LOGGING": {
         "ENABLED": True,
-    }
+    },
 }

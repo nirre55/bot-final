@@ -5,6 +5,7 @@ Responsabilité unique : Orchestration des différents composants du bot
 """
 import asyncio
 import sys
+import signal
 from typing import Dict, Any, Optional
 import datetime
 
@@ -14,6 +15,7 @@ from core.display import DataDisplay
 from core.logger import setup_logging
 from core.rsi_service import RSIService
 from core.ha_service import HAService
+from core.signal_service import SignalService
 from websocket.websocket_manager import WebSocketManager
 
 # Configuration de l'encodage pour Windows
@@ -35,11 +37,13 @@ class BinanceTradingBot:
         self.display = DataDisplay()
         self.rsi_service = RSIService()
         self.ha_service = HAService()
+        self.signal_service = SignalService()
         
         # Variables pour gérer la mise à jour des RSI et HA
         self.cached_rsi_data: Optional[Dict[str, Dict]] = None
         self.cached_ha_data: Optional[Dict[str, str]] = None
         self.rsi_displayed_for_current_candle: bool = False
+        self.shutdown_requested: bool = False
         
         # Le WebSocket manager sera initialisé avec un handler de messages
         self.websocket_manager: WebSocketManager
@@ -119,6 +123,9 @@ class BinanceTradingBot:
             
             # Calculer et afficher la couleur HA de la bougie fermée
             self._calculate_and_display_ha()
+            
+            # Traiter les données pour la détection de signaux
+            self._process_signal_detection()
                 
         except Exception as e:
             self.logger.error(f"Erreur lors du calcul RSI: {e}", exc_info=True)
@@ -149,11 +156,56 @@ class BinanceTradingBot:
         except Exception as e:
             self.logger.error(f"Erreur lors du calcul HA: {e}", exc_info=True)
     
+    def _process_signal_detection(self) -> None:
+        """Traite la détection de signaux avec les données RSI et HA"""
+        self.logger.debug("_process_signal_detection called")
+        
+        try:
+            # Traiter avec le service de signaux
+            signal = self.signal_service.process_market_data(
+                self.cached_rsi_data, 
+                self.cached_ha_data
+            )
+            
+            if signal:
+                # Signal confirmé - afficher
+                signal_display = self.signal_service.format_signal_display(signal)
+                print(f"{signal_display}")
+                
+                self.logger.info(f"Signal de trading détecté: {signal}")
+                
+                # TODO: Implémenter logique de trading ici
+                # self._execute_trade(signal)
+                
+                # Reset pour chercher le prochain signal
+                self.signal_service.reset_signal()
+            else:
+                # Afficher l'état actuel si pas de signal
+                status = self.signal_service.get_current_status()
+                if status["state"] != "waiting":
+                    self.logger.debug(f"État signal: {status}")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la détection de signaux: {e}", exc_info=True)
+    
     def _display_account_balance(self) -> None:
         """Récupère et affiche la balance du compte"""
         self.logger.debug("_display_account_balance called")
         balance_data = self.binance_client.get_account_balance()
         self.display.display_balance(balance_data)
+    
+    def _setup_signal_handlers(self) -> None:
+        """Configure les gestionnaires de signaux pour un arrêt propre"""
+        def signal_handler(signum: int, frame: Any) -> None:
+            self.logger.info(f"Signal {signum} reçu - arrêt demandé")
+            self.shutdown_requested = True
+            self.websocket_manager.stop()
+        
+        # Gestion des signaux sur Unix/Linux/Mac
+        if hasattr(signal, 'SIGINT'):
+            signal.signal(signal.SIGINT, signal_handler)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, signal_handler)
     
     async def run_bot(self) -> None:
         """Lance le bot de trading"""
@@ -161,6 +213,9 @@ class BinanceTradingBot:
         self.logger.info("Démarrage du bot de trading")
         
         try:
+            # Configuration des gestionnaires de signaux
+            self._setup_signal_handlers()
+            
             # Affichage des informations de démarrage
             self.display.display_startup_info()
             
@@ -187,7 +242,10 @@ class BinanceTradingBot:
             print(f"\nErreur lors de l'exécution du bot: {e}")
         finally:
             # Arrêt propre du WebSocket manager
+            self.logger.info("Nettoyage final et fermeture du bot")
             self.websocket_manager.stop()
+            # Attendre un moment pour que les connexions se ferment proprement
+            await asyncio.sleep(1)
             self.display.display_shutdown_info()
 
 
