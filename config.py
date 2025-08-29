@@ -42,8 +42,8 @@ LOGGING_CONFIG: Dict[str, Any] = {
     "FILE_LOGGING": {
         "ENABLED": True,
         "FILENAME": "logs/trading_bot.log",
-        "MAX_BYTES": 10485760,  # 10MB
-        "BACKUP_COUNT": 5,
+        "MAX_BYTES": 1048576,  # 1MB (plus petit pour éviter les gros fichiers)
+        "BACKUP_COUNT": 3,
     },
     "CONSOLE_LOGGING": {
         "ENABLED": True,

@@ -13,6 +13,7 @@ from api.binance_client import BinanceAPIClient
 from core.display import DataDisplay
 from core.logger import setup_logging
 from core.rsi_service import RSIService
+from core.ha_service import HAService
 from websocket.websocket_manager import WebSocketManager
 
 # Configuration de l'encodage pour Windows
@@ -33,9 +34,11 @@ class BinanceTradingBot:
         self.binance_client = BinanceAPIClient()
         self.display = DataDisplay()
         self.rsi_service = RSIService()
+        self.ha_service = HAService()
         
-        # Variables pour gérer la mise à jour des RSI
+        # Variables pour gérer la mise à jour des RSI et HA
         self.cached_rsi_data: Optional[Dict[str, Dict]] = None
+        self.cached_ha_data: Optional[Dict[str, str]] = None
         self.rsi_displayed_for_current_candle: bool = False
         
         # Le WebSocket manager sera initialisé avec un handler de messages
@@ -92,7 +95,7 @@ class BinanceTradingBot:
             self.logger.error(f"Erreur lors de l'affichage des données kline: {e}", exc_info=True)
     
     def _calculate_and_display_rsi(self) -> None:
-        """Calcule et affiche les RSI"""
+        """Calcule et affiche les RSI et la couleur HA"""
         self.logger.debug("_calculate_and_display_rsi called")
         
         try:
@@ -103,7 +106,7 @@ class BinanceTradingBot:
             )
             
             if rsi_data:
-                # Mettre à jour le cache
+                # Mettre à jour le cache RSI
                 self.cached_rsi_data = rsi_data
                 
                 # Formater et afficher les RSI
@@ -113,9 +116,38 @@ class BinanceTradingBot:
                 self.logger.info("RSI calculés et mis à jour")
             else:
                 self.logger.warning("Impossible de calculer les RSI")
+            
+            # Calculer et afficher la couleur HA de la bougie fermée
+            self._calculate_and_display_ha()
                 
         except Exception as e:
             self.logger.error(f"Erreur lors du calcul RSI: {e}", exc_info=True)
+    
+    def _calculate_and_display_ha(self) -> None:
+        """Calcule et affiche la couleur de la bougie HA fermée"""
+        self.logger.debug("_calculate_and_display_ha called")
+        
+        try:
+            # Calculer la couleur HA pour le symbole configuré
+            ha_data = self.ha_service.get_latest_ha_candle_color(
+                config.SYMBOL,
+                config.TIMEFRAME
+            )
+            
+            if ha_data:
+                # Mettre à jour le cache HA
+                self.cached_ha_data = ha_data
+                
+                # Formater et afficher la couleur HA
+                ha_display = self.ha_service.format_ha_display(ha_data)
+                print(f"{ha_display}")
+                
+                self.logger.info("Couleur HA calculée et affichée")
+            else:
+                self.logger.warning("Impossible de calculer la couleur HA")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors du calcul HA: {e}", exc_info=True)
     
     def _display_account_balance(self) -> None:
         """Récupère et affiche la balance du compte"""

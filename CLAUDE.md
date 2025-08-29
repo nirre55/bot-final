@@ -2,90 +2,104 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Architecture Overview
+## Project Overview
 
-This is a Python-based Binance futures trading bot with WebSocket connectivity and technical indicator analysis.
+This is a Python-based **Binance futures trading bot** that connects to real-time WebSocket streams to calculate RSI and Heikin Ashi indicators. The bot displays trading signals when candles close, using a modular service-oriented architecture with single responsibility principles.
 
-### Core Components
+## Core Architecture
 
-- **`trading_bot.py`**: Main bot class with WebSocket connection, balance retrieval, and automatic reconnection logic
-- **`config.py`**: Centralized configuration management for API credentials, reconnection settings, signal parameters, and logging
-- **`indicators/`**: Technical analysis modules with static calculation methods
-  - `rsi.py`: RSI calculation with multiple periods and EMA-based smoothing
-  - `heikin_ashi.py`: Heikin Ashi candle transformations
-- **`.env`**: API credentials and trading configuration (not tracked in git)
+### Service-Oriented Design
+The bot follows a **layered architecture** where each component has a single responsibility:
 
-### Key Architecture Patterns
+- **`trading_bot.py`**: Main orchestrator that coordinates all services and handles WebSocket message processing
+- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService)  
+- **Indicator Layer** (`indicators/`): Pure calculation logic (RSI, Heikin Ashi)
+- **API Layer** (`api/`): External service communication (Binance REST API, market data)
+- **WebSocket Layer** (`websocket/`): Real-time data streaming with auto-reconnection
 
-- **Configuration-driven**: All settings centralized in `config.py` with environment variable loading
-- **Logging integration**: Comprehensive logging system with file rotation and configurable levels
-- **Reconnection resilience**: WebSocket auto-reconnection with exponential backoff and timeout handling
-- **Modular indicators**: Self-contained indicator classes with static methods for stateless calculations
+### Key Integration Pattern
+The bot triggers calculations **only on candle close events** detected through WebSocket kline streams:
+1. WebSocket receives kline data → `_handle_kline_message()`
+2. On candle close → `_calculate_and_display_rsi()` 
+3. RSI calculation → `_calculate_and_display_ha()`
+4. Display both RSI values and HA candle color with emojis
 
-## Development Commands
+## Common Commands
 
-### Setup and Installation
-
+### Setup and Running
 ```bash
-pip install -r requirements.txt
-```
+# Install dependencies
+pip install pandas numpy requests websockets python-dotenv
 
-### Running the Bot
+# Create .env file with Binance API credentials
+# BINANCE_API_KEY=your_api_key  
+# BINANCE_SECRET_KEY=your_secret_key
 
-```bash
+# Run the bot
 python trading_bot.py
 ```
 
 ### Configuration
+- **Trading parameters**: Modify `config.py` (symbol, timeframe, RSI thresholds)
+- **Logging levels**: Adjust `LOGGING_CONFIG` in `config.py`
+- **Reconnection settings**: Configure `RECONNECTION_CONFIG` for WebSocket resilience
 
-- Copy and configure `.env` file with Binance API credentials
-- Adjust settings in `config.py` for symbol, timeframes, and reconnection parameters
-- Modify `LOGGING_CONFIG` for log levels and output destinations
+## Key Technical Details
 
-### Debugging
+### RSI Configuration
+The bot calculates **multiple RSI periods** with different sensitivity thresholds:
+- RSI 5: 10/90 (highly sensitive)
+- RSI 14: 20/80 (standard)  
+- RSI 21: 30/70 (less sensitive)
 
-- Logs are written to `logs/trading_bot.log` with automatic rotation
-- Set `LOGGING_CONFIG["LEVEL"]` to "DEBUG" for detailed flow information
-- Use `INFO` level for operational events, `WARNING` for handled exceptions, `ERROR` for failures
-
-## Code Standards
-
-### Project Rules
-
-- Principle KISS: Keep It Simple, Stupid
-- One responsibility per file
-- Maximum 80 lines per function
-- Self-documenting code with explicit variable/function names
-- Always fix Pylance errors/warnings immediately
-- No `type: ignore` without justification comments
-- Comprehensive logging at appropriate levels (DEBUG for flow, INFO for operations, WARNING for exceptions, ERROR for failures)
-
-### Technical Indicators Structure
-
-- Static methods for stateless calculations
-- Pandas Series input/output for vectorized operations
-- Multiple period calculations in single calls
-- Classification methods for trading signal interpretation
+### Data Requirements
+- **RSI calculations**: Requires 100 historical candles
+- **Heikin Ashi calculations**: Requires 50 historical candles
+- **WebSocket stream**: `{symbol}@kline_{timeframe}` format
 
 ### WebSocket Connection Management
+- **Auto-reconnection**: Up to 100 attempts with 30-second delays
+- **Connection health**: 3600-second timeout monitoring
+- **Target endpoint**: Binance USDⓈ-M Futures WebSocket (`wss://fstream.binance.com/ws/`)
 
-- Connection state tracking with `is_running` flag
-- Automatic reconnection with configurable attempts and delays
-- Timeout-based connection health monitoring
-- Comprehensive error handling for network issues
+## Logging System
 
-## Configuration Management
+Comprehensive logging with file rotation:
+- **Location**: `logs/trading_bot.log`
+- **Rotation**: 1MB max size, 3 backup files
+- **Module-specific loggers**: Each component uses `get_module_logger()`
+- **Format**: Timestamp | Level | Module.Function | Message
 
-All configuration is centralized in `config.py`:
+## Signal Detection Logic
 
-- **Trading parameters**: Symbol, timeframe, WebSocket URLs
-- **Reconnection settings**: Max attempts, delays, timeouts
-- **Signal thresholds**: RSI oversold/overbought levels for different periods
-- **Logging configuration**: Levels, formats, file rotation settings
+### RSI Signals
+Each RSI period has different thresholds for oversold/overbought detection configured in `SIGNAL_CONFIG`. The system displays all RSI values with color-coded indicators.
 
-Environment variables are loaded via `python-dotenv` from `.env` file for sensitive data like API keys.
+### Heikin Ashi Display
+- **Green 🟢**: Bullish HA candle (HA_close > HA_open)
+- **Red 🔴**: Bearish HA candle (HA_close < HA_open)  
+- **White ⚪**: Doji HA candle (HA_close = HA_open)
 
-## Development Rules & Standards
+## Architecture Principles
+
+### Single Responsibility
+- **Services** (`core/`): Orchestrate data retrieval + calculations
+- **Indicators** (`indicators/`): Pure mathematical calculations
+- **Clients** (`api/`): External API communication only
+
+### Error Resilience
+- WebSocket auto-reconnection with exponential backoff
+- Comprehensive exception handling in all service methods
+- Detailed error logging with stack traces
+
+### Configuration-Driven
+All operational parameters externalized to `config.py`:
+- Trading symbols and timeframes
+- API endpoints and WebSocket URLs
+- Signal detection thresholds
+- Logging and reconnection settings
+
+When modifying the bot, maintain this separation of concerns and ensure all changes preserve the single-responsibility principle across modules.
 
 ### Architecture & Design
 - **Principle KISS**: Keep It Simple, Stupid - always prefer the simplest solution
