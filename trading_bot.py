@@ -16,6 +16,7 @@ from core.logger import setup_logging
 from core.rsi_service import RSIService
 from core.ha_service import HAService
 from core.signal_service import SignalService
+from core.trading_service import TradingService
 from websocket.websocket_manager import WebSocketManager
 
 # Configuration de l'encodage pour Windows
@@ -38,6 +39,7 @@ class BinanceTradingBot:
         self.rsi_service = RSIService()
         self.ha_service = HAService()
         self.signal_service = SignalService()
+        self.trading_service = TradingService()
         
         # Variables pour gérer la mise à jour des RSI et HA
         self.cached_rsi_data: Optional[Dict[str, Dict]] = None
@@ -50,10 +52,53 @@ class BinanceTradingBot:
         self._init_websocket_manager()
         
         self.logger.info("Bot de trading initialisé avec tous ses composants")
+        
+        # Précharger les informations du symbole de trading
+        self._preload_symbol_information()
     
     def _init_websocket_manager(self) -> None:
         """Initialise le gestionnaire WebSocket avec le handler de messages"""
         self.websocket_manager = WebSocketManager(self._handle_kline_message)
+    
+    def _preload_symbol_information(self) -> None:
+        """Précharge les informations du symbole de trading au démarrage"""
+        self.logger.debug("_preload_symbol_information called")
+        self.logger.info(f"Préchargement des informations pour {config.SYMBOL}")
+        
+        try:
+            success = self.trading_service.preload_symbol_info(config.SYMBOL)
+            
+            if success:
+                self.logger.info(f"✅ Informations {config.SYMBOL} préchargées avec succès")
+                print(f"[INIT] Informations de trading préchargées pour {config.SYMBOL}")
+            else:
+                self.logger.error(f"❌ Échec du préchargement pour {config.SYMBOL}")
+                print(f"[ERREUR] Impossible de précharger les infos de {config.SYMBOL}")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors du préchargement: {e}", exc_info=True)
+            print(f"[ERREUR] Problème lors du préchargement: {e}")
+    
+    def _display_trading_info(self) -> None:
+        """Affiche les informations de trading préchargées"""
+        self.logger.debug("_display_trading_info called")
+        
+        try:
+            # Récupérer la quantité minimale depuis le cache
+            min_qty = self.trading_service.get_minimum_trade_quantity(config.SYMBOL)
+            
+            if min_qty:
+                print(f"[TRADING] Symbole: {config.SYMBOL}")
+                print(f"[TRADING] Quantité minimale: {min_qty}")
+                print(f"[TRADING] Type d'ordre: MARKET")
+                self.logger.info(f"Informations de trading affichées: {config.SYMBOL} min={min_qty}")
+            else:
+                print(f"[TRADING] ⚠️ Quantité minimale non disponible pour {config.SYMBOL}")
+                self.logger.warning("Quantité minimale non disponible pour l'affichage")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'affichage des infos trading: {e}", exc_info=True)
+            print("[TRADING] ❌ Erreur lors de l'affichage des informations")
     
     def _handle_kline_message(self, kline_data: Dict[str, Any]) -> None:
         """
@@ -174,8 +219,8 @@ class BinanceTradingBot:
                 
                 self.logger.info(f"Signal de trading détecté: {signal}")
                 
-                # TODO: Implémenter logique de trading ici
-                # self._execute_trade(signal)
+                # Exécuter le trade
+                self._execute_trade(signal)
                 
                 # Reset pour chercher le prochain signal
                 self.signal_service.reset_signal()
@@ -187,6 +232,29 @@ class BinanceTradingBot:
                 
         except Exception as e:
             self.logger.error(f"Erreur lors de la détection de signaux: {e}", exc_info=True)
+    
+    def _execute_trade(self, signal: Dict[str, Any]) -> None:
+        """Exécute un trade basé sur un signal validé"""
+        self.logger.debug("_execute_trade called")
+        
+        try:
+            # Exécuter le trade avec le service de trading
+            order_result = self.trading_service.execute_signal_trade(signal)
+            
+            if order_result:
+                # Trade réussi - afficher le résultat
+                trade_display = self.trading_service.format_trade_display(signal, order_result)
+                print(f"{trade_display}")
+                
+                self.logger.info(f"Trade exécuté avec succès: {order_result}")
+            else:
+                # Trade échoué
+                self.logger.error("❌ Échec de l'exécution du trade")
+                print("❌ ERREUR: Trade non exécuté")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'exécution du trade: {e}", exc_info=True)
+            print("❌ ERREUR: Problème lors de l'exécution du trade")
     
     def _display_account_balance(self) -> None:
         """Récupère et affiche la balance du compte"""
@@ -225,6 +293,9 @@ class BinanceTradingBot:
             # Affichage des informations de connexion
             self.display.display_connection_info()
             self.display.display_reconnection_config()
+            
+            # Affichage des informations de trading préchargées
+            self._display_trading_info()
             
             print("Appuyez sur Ctrl+C pour arrêter le bot\n")
 

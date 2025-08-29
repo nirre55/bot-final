@@ -141,3 +141,168 @@ class BinanceAPIClient:
         except Exception as e:
             self.logger.error(f"Erreur lors de la récupération des informations: {e}", exc_info=True)
             return None
+    
+    def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Récupère les informations d'un symbole (précision, quantité min, etc.)
+        
+        Args:
+            symbol: Symbole à récupérer
+            
+        Returns:
+            Informations du symbole ou None
+        """
+        self.logger.debug(f"get_symbol_info called for {symbol}")
+        self.logger.info(f"Récupération des informations du symbole {symbol}")
+        
+        try:
+            endpoint = "/fapi/v1/exchangeInfo"
+            
+            response = requests.get(f"{self.base_url}{endpoint}")
+            
+            if response.status_code == 200:
+                exchange_info = response.json()
+                
+                # Chercher le symbole spécifique
+                for symbol_info in exchange_info.get("symbols", []):
+                    if symbol_info.get("symbol") == symbol:
+                        self.logger.info(f"Informations trouvées pour {symbol}")
+                        return symbol_info
+                
+                self.logger.warning(f"Symbole {symbol} non trouvé")
+                return None
+                
+            else:
+                self.logger.error(f"Erreur lors de la récupération: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la récupération du symbole: {e}", exc_info=True)
+            return None
+    
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: str,
+        order_type: str = "MARKET",
+        position_side: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Place un ordre sur Binance Futures
+        
+        Args:
+            symbol: Symbole de trading
+            side: BUY ou SELL
+            quantity: Quantité à trader
+            order_type: Type d'ordre (MARKET par défaut)
+            position_side: LONG ou SHORT (requis en mode Hedge)
+            
+        Returns:
+            Réponse de l'ordre ou None
+        """
+        self.logger.debug(f"place_order called: {symbol} {side} {quantity}")
+        self.logger.info(f"Placement d'ordre {side} {quantity} {symbol}")
+        
+        try:
+            endpoint = "/fapi/v1/order"
+            timestamp = int(time.time() * 1000)
+            
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "side": side,
+                "type": order_type,
+                "quantity": quantity,
+                "timestamp": timestamp
+            }
+            
+            # Ajouter positionSide si spécifié (requis pour mode Hedge)
+            if position_side:
+                params["positionSide"] = position_side
+                self.logger.debug(f"Position side définie: {position_side}")
+            
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+            
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            response = requests.post(
+                f"{self.base_url}{endpoint}",
+                params=params,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                order_data = response.json()
+                self.logger.info(f"Ordre placé avec succès: {order_data.get('orderId')}")
+                return order_data
+            else:
+                self.logger.error(f"Erreur placement ordre: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors du placement d'ordre: {e}", exc_info=True)
+            return None
+    
+    def place_stop_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: str,
+        stop_price: str,
+        position_side: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Place un ordre STOP_MARKET sur Binance Futures
+        
+        Args:
+            symbol: Symbole de trading
+            side: BUY ou SELL
+            quantity: Quantité à trader
+            stop_price: Prix de déclenchement du stop
+            position_side: LONG ou SHORT (requis en mode Hedge)
+            
+        Returns:
+            Réponse de l'ordre ou None
+        """
+        self.logger.debug(f"place_stop_market_order called: {symbol} {side} {quantity} @ {stop_price}")
+        self.logger.info(f"Placement ordre STOP_MARKET {side} {quantity} {symbol} @ {stop_price}")
+        
+        try:
+            endpoint = "/fapi/v1/order"
+            timestamp = int(time.time() * 1000)
+            
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "side": side,
+                "type": "STOP_MARKET",
+                "quantity": quantity,
+                "stopPrice": stop_price,
+                "positionSide": position_side,
+                "timestamp": timestamp
+            }
+            
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+            
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            response = requests.post(
+                f"{self.base_url}{endpoint}",
+                params=params,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                order_data = response.json()
+                self.logger.info(f"Ordre STOP_MARKET placé avec succès: {order_data.get('orderId')}")
+                return order_data
+            else:
+                self.logger.error(f"Erreur placement STOP_MARKET: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors du placement STOP_MARKET: {e}", exc_info=True)
+            return None

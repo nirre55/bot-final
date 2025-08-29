@@ -27,10 +27,17 @@ RECONNECTION_CONFIG: Dict[str, Any] = {
 # Configuration détection de signaux de trading
 SIGNAL_CONFIG: Dict[str, Dict[int, Dict[str, int]]] = {
     "RSI_THRESHOLDS": {
-        3: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
-        5: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
-        7: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
+        1: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
+        2: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
+        3: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
     }
+}
+
+# Configuration du système de hedging
+HEDGING_CONFIG: Dict[str, Any] = {
+    "ENABLED": True,  # Activer/désactiver le hedging automatique
+    "LOOKBACK_CANDLES": 5,  # Nombre de bougies à analyser pour high/low
+    "QUANTITY_MULTIPLIER": 2,  # Multiplicateur de quantité pour l'ordre hedge (2x)
 }
 
 # Configuration du système de logging
