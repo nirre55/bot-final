@@ -12,7 +12,7 @@ This is a Python-based **Binance futures trading bot** that connects to real-tim
 The bot follows a **layered architecture** where each component has a single responsibility:
 
 - **`trading_bot.py`**: Main orchestrator that coordinates all services and handles WebSocket message processing
-- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService, TradingService)  
+- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService, TradingService, CascadeService)  
 - **Indicator Layer** (`indicators/`): Pure calculation logic (RSI, Heikin Ashi)
 - **API Layer** (`api/`): External service communication (Binance REST API, market data)
 - **WebSocket Layer** (`websocket/`): Real-time data streaming with auto-reconnection
@@ -25,6 +25,7 @@ The bot triggers calculations **only on candle close events** detected through W
 4. Display both RSI values and HA candle color with emojis
 5. Process signal detection → `_process_signal_detection()`
 6. Execute trade with automatic hedging → `_execute_trade()`
+7. Start cascade trading system → `CascadeService.start_cascade()`
 
 ## Common Commands
 
@@ -46,6 +47,7 @@ python trading_bot.py
 - **Logging levels**: Adjust `LOGGING_CONFIG` in `config.py`
 - **Reconnection settings**: Configure `RECONNECTION_CONFIG` for WebSocket resilience
 - **Hedging system**: Configure `HEDGING_CONFIG` for automatic hedge orders
+- **Cascade trading**: Configure `CASCADE_CONFIG` for advanced cascade system
 
 ## Key Technical Details
 
@@ -115,10 +117,41 @@ The bot includes **automatic hedge order creation** after each signal execution:
 - `LOOKBACK_CANDLES`: Number of candles for high/low analysis
 - `QUANTITY_MULTIPLIER`: Size multiplier for hedge orders
 
+### Cascade Trading System
+The bot features an **advanced cascade trading system** that automatically creates alternating orders after hedging:
+
+**Cascade Logic**:
+- **Step 1**: Signal triggers initial order + hedge (as above)
+- **Step 2**: When hedge executes → Create opposite order with doubled quantity minus existing position
+- **Step 3**: Continue alternating LONG/SHORT orders using execution prices as permanent stop levels
+- **Formula**: `Next quantity = (2 × Triggered quantity) - Existing quantity same side`
+
+**Example Sequence**:
+```
+Signal LONG: BUY 0.001 @ 111200 → Hedge: SELL 0.002 @ 111000
+Hedge executes → LONG 0.003 @ 111200 (stop)
+LONG executes → SHORT 0.006 @ 111000 (stop)  
+SHORT executes → LONG 0.012 @ 111200 (stop)
+... continues alternating with increasing quantities
+```
+
+**Cascade Configuration** (`CASCADE_CONFIG`):
+- `ENABLED`: Enable/disable cascade trading system
+- `MAX_ORDERS`: Maximum number of cascade orders (default: 10)
+- `POLLING_INTERVAL_SECONDS`: Order status checking frequency (default: 30s)
+- `RETRY_ATTEMPTS`: Retry count for failed orders (excluding insufficient funds)
+
+**Key Features**:
+- **Permanent Stop Levels**: Uses execution prices of first two orders as reference points
+- **Signal Blocking**: Prevents new signals while cascade is active
+- **Real-time Monitoring**: Displays cascade status with position tracking
+- **Automatic Termination**: Stops at MAX_ORDERS limit or on critical errors
+
 ### Position Management
 - **Hedge Mode**: Uses Binance hedge mode with position sides (LONG/SHORT)
-- **Order Types**: MARKET orders for signals, STOP_MARKET orders for hedges
-- **Quantity Management**: Automatic calculation of minimum trade sizes with proper formatting
+- **Order Types**: MARKET orders for signals, STOP_MARKET orders for hedges and cascade
+- **Price Recovery**: Retrieves execution prices via API for accuracy
+- **Quantity Management**: Automatic calculation with proper formatting and step size compliance
 
 ## Architecture Principles
 

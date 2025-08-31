@@ -350,13 +350,6 @@ class CascadeService:
         self.logger.debug("_create_next_cascade_order called")
         
         try:
-            # DEBUG: Afficher l'état actuel
-            self.logger.info(f"DEBUG - État cascade:")
-            self.logger.info(f"  current_long_quantity: {self.current_long_quantity}")
-            self.logger.info(f"  current_short_quantity: {self.current_short_quantity}")
-            self.logger.info(f"  initial_long_price: {self.initial_long_price}")
-            self.logger.info(f"  initial_short_price: {self.initial_short_price}")
-            
             # Déterminer quel type d'ordre créer (alternance)
             if self.current_long_quantity > self.current_short_quantity:
                 # Plus de LONG → Créer SHORT
@@ -373,11 +366,6 @@ class CascadeService:
                 # Quantité = 2 * current_short_quantity - current_long_quantity
                 next_quantity = (2 * self.current_short_quantity) - self.current_long_quantity
             
-            # DEBUG: Afficher la décision
-            self.logger.info(f"DEBUG - Décision cascade:")
-            self.logger.info(f"  next_side: {next_side}")
-            self.logger.info(f"  stop_price choisi: {stop_price}")
-            self.logger.info(f"  next_quantity calculée: {next_quantity}")
             
             if next_quantity <= 0:
                 self.logger.error(f"Quantité cascade invalide: {next_quantity}")
@@ -415,10 +403,32 @@ class CascadeService:
                 self.logger.info(f"✅ Ordre cascade créé - ID: {cascade_order.get('orderId')}")
             else:
                 self.logger.error("❌ Échec de création de l'ordre cascade")
-                # TODO: Implémenter retry si pas fonds insuffisants
+                self._handle_cascade_order_failure(next_side, formatted_quantity, stop_price)
                 
         except Exception as e:
             self.logger.error(f"Erreur lors de la création de l'ordre cascade: {e}", exc_info=True)
+    
+    def _handle_cascade_order_failure(self, side: str, quantity: str, stop_price: float) -> None:
+        """
+        Gère les échecs de création d'ordres cascade
+        
+        Args:
+            side: Côté de l'ordre (BUY/SELL)
+            quantity: Quantité formatée
+            stop_price: Prix de stop utilisé
+        """
+        self.logger.debug(f"_handle_cascade_order_failure called: {side} {quantity} @ {stop_price}")
+        
+        # Pour l'instant, arrêter la cascade en cas d'échec
+        # Dans le futur, on pourrait implémenter des retry selon le type d'erreur
+        self.logger.warning(f"Arrêt de la cascade suite à l'échec de création d'ordre {side}")
+        self.state = CascadeState.STOPPED
+        
+        # Ajouter des métriques pour debugging
+        self.logger.info(f"État au moment de l'échec:")
+        self.logger.info(f"  Ordres créés: {self.cascade_orders_count}/{config.CASCADE_CONFIG['MAX_ORDERS']}")
+        self.logger.info(f"  Positions: LONG={self.current_long_quantity} SHORT={self.current_short_quantity}")
+        self.logger.info(f"  Prix références: LONG={self.initial_long_price} SHORT={self.initial_short_price}")
     
     def _format_cascade_quantity(self, quantity: float) -> Optional[str]:
         """
@@ -497,10 +507,13 @@ class CascadeService:
         if self.state == CascadeState.WAITING_HEDGE:
             return "CASCADE: 🔄 Attente exécution hedge initial"
         elif self.state == CascadeState.ACTIVE:
+            pending_info = f"En attente: {len(self.pending_orders)}" if self.pending_orders else ""
             return (f"CASCADE: 🔄 Actif ({status['orders_count']}/{status['max_orders']}) "
                    f"| LONG:{status['current_long_quantity']:.3f} "
-                   f"SHORT:{status['current_short_quantity']:.3f}")
+                   f"SHORT:{status['current_short_quantity']:.3f} "
+                   f"| {pending_info}")
         elif self.state == CascadeState.STOPPED:
-            return "CASCADE: 🛑 Arrêté"
+            reason = "Limite atteinte" if status['orders_count'] >= status['max_orders'] else "Arrêté"
+            return f"CASCADE: 🛑 {reason} ({status['orders_count']}/{status['max_orders']})"
         
         return "CASCADE: ❓ État inconnu"
