@@ -12,7 +12,7 @@ This is a Python-based **Binance futures trading bot** that connects to real-tim
 The bot follows a **layered architecture** where each component has a single responsibility:
 
 - **`trading_bot.py`**: Main orchestrator that coordinates all services and handles WebSocket message processing
-- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService)  
+- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService, TradingService)  
 - **Indicator Layer** (`indicators/`): Pure calculation logic (RSI, Heikin Ashi)
 - **API Layer** (`api/`): External service communication (Binance REST API, market data)
 - **WebSocket Layer** (`websocket/`): Real-time data streaming with auto-reconnection
@@ -24,6 +24,7 @@ The bot triggers calculations **only on candle close events** detected through W
 3. RSI calculation → `_calculate_and_display_ha()`
 4. Display both RSI values and HA candle color with emojis
 5. Process signal detection → `_process_signal_detection()`
+6. Execute trade with automatic hedging → `_execute_trade()`
 
 ## Common Commands
 
@@ -44,19 +45,21 @@ python trading_bot.py
 - **Trading parameters**: Modify `config.py` (symbol, timeframe, RSI thresholds)
 - **Logging levels**: Adjust `LOGGING_CONFIG` in `config.py`
 - **Reconnection settings**: Configure `RECONNECTION_CONFIG` for WebSocket resilience
+- **Hedging system**: Configure `HEDGING_CONFIG` for automatic hedge orders
 
 ## Key Technical Details
 
 ### RSI Configuration
 The bot calculates **multiple RSI periods** with different sensitivity thresholds:
-- RSI 3: 10/90 (highly sensitive)
-- RSI 5: 20/80 (standard)  
-- RSI 7: 30/70 (less sensitive)
+- RSI period 1 (3 candles): 10/90 thresholds (highly sensitive)
+- RSI period 2 (5 candles): 20/80 thresholds (standard)  
+- RSI period 3 (7 candles): 30/70 thresholds (less sensitive)
 
 ### Data Requirements
-- **RSI calculations**: Requires 100 historical candles
+- **RSI calculations**: Requires 100 historical candles minimum
 - **Heikin Ashi calculations**: Requires 50 historical candles
 - **WebSocket stream**: `{symbol}@kline_{timeframe}` format
+- **Hedging analysis**: Configurable lookback candles for high/low detection
 
 ### WebSocket Connection Management
 - **Auto-reconnection**: Up to 100 attempts with 30-second delays
@@ -70,16 +73,6 @@ Comprehensive logging with file rotation:
 - **Rotation**: 1MB max size, 3 backup files
 - **Module-specific loggers**: Each component uses `get_module_logger()`
 - **Format**: Timestamp | Level | Module.Function | Message
-
-## Signal Detection Logic
-
-### RSI Signals
-Each RSI period has different thresholds for oversold/overbought detection configured in `SIGNAL_CONFIG`. The system displays all RSI values with color-coded indicators.
-
-### Heikin Ashi Display
-- **Green 🟢**: Bullish HA candle (HA_close > HA_open)
-- **Red 🔴**: Bearish HA candle (HA_close < HA_open)  
-- **White ⚪**: Doji HA candle (HA_close = HA_open)
 
 ## Trading Signal System
 
@@ -101,6 +94,32 @@ The bot implements a **sequential signal detection system** requiring two distin
 
 **Important**: The two steps must be **sequential**, not simultaneous. Once HA confirmation is received, the signal remains valid even if RSI values exit oversold/overbought zones.
 
+### Heikin Ashi Display
+- **Green 🟢**: Bullish HA candle (HA_close > HA_open)
+- **Red 🔴**: Bearish HA candle (HA_close < HA_open)  
+- **White ⚪**: Doji HA candle (HA_close = HA_open)
+
+## Advanced Trading Features
+
+### Automated Hedging System
+The bot includes **automatic hedge order creation** after each signal execution:
+
+**Hedge Logic**:
+- **LONG signal** → Creates SHORT hedge with stop at recent highest price
+- **SHORT signal** → Creates LONG hedge with stop at recent lowest price
+- **Quantity**: Configurable multiplier (default: 2x original order size)
+- **Analysis period**: Configurable lookback candles for high/low detection
+
+**Hedge Configuration** (`HEDGING_CONFIG`):
+- `ENABLED`: Enable/disable automatic hedging
+- `LOOKBACK_CANDLES`: Number of candles for high/low analysis
+- `QUANTITY_MULTIPLIER`: Size multiplier for hedge orders
+
+### Position Management
+- **Hedge Mode**: Uses Binance hedge mode with position sides (LONG/SHORT)
+- **Order Types**: MARKET orders for signals, STOP_MARKET orders for hedges
+- **Quantity Management**: Automatic calculation of minimum trade sizes with proper formatting
+
 ## Architecture Principles
 
 ### Single Responsibility
@@ -112,6 +131,7 @@ The bot implements a **sequential signal detection system** requiring two distin
 - WebSocket auto-reconnection with exponential backoff
 - Comprehensive exception handling in all service methods
 - Detailed error logging with stack traces
+- Symbol information caching to reduce API calls
 
 ### Configuration-Driven
 All operational parameters externalized to `config.py`:
@@ -119,8 +139,11 @@ All operational parameters externalized to `config.py`:
 - API endpoints and WebSocket URLs
 - Signal detection thresholds
 - Logging and reconnection settings
+- Hedging system parameters
 
 When modifying the bot, maintain this separation of concerns and ensure all changes preserve the single-responsibility principle across modules.
+
+## Code Quality Standards
 
 ### Architecture & Design
 - **Principle KISS**: Keep It Simple, Stupid - always prefer the simplest solution
@@ -129,7 +152,7 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 - **Avoid over-engineering**: No premature abstractions
 - **Code simplicity**: Simple and readable code over complex solutions
 
-### Code Quality Standards
+### Python Standards
 - **PEP8 strict**: Rigorous adherence to Python style conventions
 - **Self-documenting code**: Explicit variable/function names
 - **Type hints complete**: Mandatory type annotations on all functions, methods, and variables

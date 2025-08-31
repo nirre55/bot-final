@@ -14,11 +14,14 @@ from core.logger import get_module_logger
 class TradingService:
     """Service pour l'exécution des trades"""
     
-    def __init__(self) -> None:
+    def __init__(self, cascade_service=None) -> None:
         """Initialise le service de trading"""
         self.logger = get_module_logger("TradingService")
         self.binance_client = BinanceAPIClient()
         self.market_data_client = MarketDataClient()
+        
+        # Référence au service cascade (injection de dépendance)
+        self.cascade_service = cascade_service
         
         # Cache des informations de symbole
         self.symbol_info_cache: Dict[str, Dict[str, Any]] = {}
@@ -256,6 +259,11 @@ class TradingService:
                 
                 # Ajouter les informations de hedge au résultat
                 order_result["hedge_order"] = hedge_result
+                
+                # Démarrer la cascade si hedge créé avec succès et cascade service disponible
+                if hedge_result and self.cascade_service and config.CASCADE_CONFIG["ENABLED"]:
+                    self.logger.info("🔄 Démarrage du système cascade")
+                    self.cascade_service.start_cascade(order_result, hedge_result)
                 
                 return order_result
             else:

@@ -40,6 +40,15 @@ HEDGING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MULTIPLIER": 2,  # Multiplicateur de quantité pour l'ordre hedge (2x)
 }
 
+# Configuration du système de cascade trading
+CASCADE_CONFIG: Dict[str, Any] = {
+    "ENABLED": True,  # Activer/désactiver le système de cascade
+    "MAX_ORDERS": 10,  # Nombre maximum d'ordres cascade
+    "POLLING_INTERVAL_SECONDS": 30,  # Intervalle de vérification des ordres (en secondes)
+    "RETRY_ATTEMPTS": 3,  # Nombre de tentatives en cas d'erreur (hors fonds insuffisants)
+    "RETRY_DELAY_SECONDS": 5,  # Délai entre les tentatives de retry
+}
+
 # Configuration du système de logging
 LOGGING_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver le logging

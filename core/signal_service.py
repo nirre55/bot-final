@@ -25,9 +25,12 @@ class SignalType(Enum):
 class SignalService:
     """Service de détection de signaux de trading à 2 étapes"""
     
-    def __init__(self) -> None:
+    def __init__(self, cascade_service=None) -> None:
         """Initialise le service de signaux"""
         self.logger = get_module_logger("SignalService")
+        
+        # Référence au service cascade (injection de dépendance)
+        self.cascade_service = cascade_service
         
         # État du système de signaux
         self.current_state: SignalState = SignalState.WAITING
@@ -61,6 +64,11 @@ class SignalService:
             rsi_value = rsi_data[rsi_key]["value"]
             oversold_threshold = config.SIGNAL_CONFIG["RSI_THRESHOLDS"][period]["OVERSOLD"]
             
+            # Vérifier que rsi_value n'est pas None
+            if rsi_value is None:
+                self.logger.warning(f"RSI {period} est None - ignoré")
+                return False
+            
             if rsi_value > oversold_threshold:
                 self.logger.debug(f"RSI {period}: {rsi_value} > {oversold_threshold} (pas oversold)")
                 return False
@@ -88,6 +96,11 @@ class SignalService:
             
             rsi_value = rsi_data[rsi_key]["value"]
             overbought_threshold = config.SIGNAL_CONFIG["RSI_THRESHOLDS"][period]["OVERBOUGHT"]
+            
+            # Vérifier que rsi_value n'est pas None
+            if rsi_value is None:
+                self.logger.warning(f"RSI {period} est None - ignoré")
+                return False
             
             if rsi_value < overbought_threshold:
                 self.logger.debug(f"RSI {period}: {rsi_value} < {overbought_threshold} (pas overbought)")
@@ -139,6 +152,11 @@ class SignalService:
             Dictionnaire avec signal confirmé ou None
         """
         self.logger.debug(f"process_market_data called - État: {self.current_state.value}")
+        
+        # Vérifier si cascade active - bloquer les nouveaux signaux
+        if self.cascade_service and self.cascade_service.is_cascade_active():
+            self.logger.debug("Cascade active - nouveaux signaux ignorés")
+            return None
         
         if not rsi_data or not ha_data:
             self.logger.debug("Données manquantes - pas de traitement")

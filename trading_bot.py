@@ -17,6 +17,7 @@ from core.rsi_service import RSIService
 from core.ha_service import HAService
 from core.signal_service import SignalService
 from core.trading_service import TradingService
+from core.cascade_service import CascadeService
 from websocket.websocket_manager import WebSocketManager
 
 # Configuration de l'encodage pour Windows
@@ -38,8 +39,13 @@ class BinanceTradingBot:
         self.display = DataDisplay()
         self.rsi_service = RSIService()
         self.ha_service = HAService()
-        self.signal_service = SignalService()
-        self.trading_service = TradingService()
+        
+        # Créer le service cascade
+        self.cascade_service = CascadeService(self.binance_client)
+        
+        # Créer les services avec injection des dépendances
+        self.signal_service = SignalService(self.cascade_service)
+        self.trading_service = TradingService(self.cascade_service)
         
         # Variables pour gérer la mise à jour des RSI et HA
         self.cached_rsi_data: Optional[Dict[str, Dict]] = None
@@ -229,6 +235,11 @@ class BinanceTradingBot:
                 status = self.signal_service.get_current_status()
                 if status["state"] != "waiting":
                     self.logger.debug(f"État signal: {status}")
+            
+            # Afficher l'état cascade s'il est actif
+            cascade_display = self.cascade_service.format_cascade_display()
+            if cascade_display:
+                print(f"{cascade_display}")
                 
         except Exception as e:
             self.logger.error(f"Erreur lors de la détection de signaux: {e}", exc_info=True)

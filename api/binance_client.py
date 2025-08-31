@@ -306,3 +306,50 @@ class BinanceAPIClient:
         except Exception as e:
             self.logger.error(f"Erreur lors du placement STOP_MARKET: {e}", exc_info=True)
             return None
+    
+    def get_order_status(self, symbol: str, order_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Récupère le statut d'un ordre spécifique
+        
+        Args:
+            symbol: Symbole de trading
+            order_id: ID de l'ordre
+            
+        Returns:
+            Statut de l'ordre ou None
+        """
+        self.logger.debug(f"get_order_status called: {symbol} {order_id}")
+        
+        try:
+            endpoint = "/fapi/v1/order"
+            timestamp = int(time.time() * 1000)
+            
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "orderId": order_id,
+                "timestamp": timestamp
+            }
+            
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+            
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            response = requests.get(
+                f"{self.base_url}{endpoint}",
+                params=params,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                order_data = response.json()
+                self.logger.debug(f"Statut ordre {order_id}: {order_data.get('status')}")
+                return order_data
+            else:
+                self.logger.error(f"Erreur récupération statut ordre: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la récupération du statut d'ordre: {e}", exc_info=True)
+            return None
