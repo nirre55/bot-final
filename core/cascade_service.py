@@ -24,10 +24,12 @@ class CascadeState(Enum):
 class CascadeService:
     """Service de gestion du système de cascade trading"""
     
-    def __init__(self, binance_client: BinanceAPIClient) -> None:
+    def __init__(self, binance_client: BinanceAPIClient, tp_service=None) -> None:
         """Initialise le service cascade"""
         self.logger = get_module_logger("CascadeService")
         self.binance_client = binance_client
+        self.tp_service = tp_service
+        self.trading_service = None  # Référence pour formatage dynamique
         
         # État du système cascade
         self.state: CascadeState = CascadeState.INACTIVE
@@ -53,7 +55,24 @@ class CascadeService:
         # Informations de l'ordre initial pour récupération du prix
         self.initial_order_info: Optional[Dict[str, Any]] = None
         
+        # Cache des informations de formatage pour éviter appels répétés
+        self._symbol_precision_cache: Optional[Dict[str, Any]] = None
+        self._cached_symbol: Optional[str] = None
+        
         self.logger.debug("CascadeService initialisé")
+    
+    def set_trading_service_reference(self, trading_service) -> None:
+        """
+        Définit la référence au TradingService après initialisation
+        
+        Args:
+            trading_service: Instance du TradingService pour formatage dynamique
+        """
+        self.trading_service = trading_service
+        self.logger.debug("Référence TradingService définie dans CascadeService")
+        
+        # Précharger le cache de précision pour le symbole actuel
+        self._cache_symbol_precision()
     
     def is_cascade_active(self) -> bool:
         """
@@ -258,6 +277,10 @@ class CascadeService:
                         self.logger.info(f"Prix SHORT hedge défini: {executed_price}")
                     self.current_short_quantity += executed_qty
                 
+                # Créer le TP pour la position hedge si service TP disponible
+                if self.tp_service and config.TP_CONFIG["ENABLED"]:
+                    self._create_tp_for_hedge_execution(side, executed_qty)
+                
                 # Passer en mode cascade active
                 self.state = CascadeState.ACTIVE
                 self.initial_hedge_order = None
@@ -335,6 +358,10 @@ class CascadeService:
             self.logger.info(f"🔄 Ordre cascade exécuté: {side} {executed_qty} @ {executed_price}")
             self.logger.info(f"Positions totales: LONG={self.current_long_quantity}, SHORT={self.current_short_quantity}")
             
+            # Mettre à jour les TP si le service TP est disponible
+            if self.tp_service and config.TP_CONFIG["ENABLED"]:
+                self._update_tp_after_cascade(side)
+            
             # Créer le prochain ordre cascade si limite pas atteinte
             if self.cascade_orders_count < config.CASCADE_CONFIG["MAX_ORDERS"]:
                 await self._create_next_cascade_order()
@@ -344,6 +371,98 @@ class CascadeService:
                 
         except Exception as e:
             self.logger.error(f"Erreur lors du traitement de l'exécution cascade: {e}", exc_info=True)
+    
+    def _update_tp_after_cascade(self, executed_side: str) -> None:
+        """
+        Met à jour les ordres TP après l'exécution d'un ordre cascade
+        
+        Args:
+            executed_side: Côté de l'ordre cascade exécuté (BUY ou SELL)
+        """
+        self.logger.debug(f"_update_tp_after_cascade called: {executed_side}")
+        
+        if not self.tp_service:
+            self.logger.debug("Service TP non disponible")
+            return
+        
+        try:
+            from core.tp_service import TPSide
+            
+            # Déterminer quel côté TP mettre à jour
+            if executed_side == "BUY":
+                # Ordre BUY exécuté → position LONG augmentée → mettre à jour TP LONG
+                tp_side = TPSide.LONG
+                current_quantity = self.current_long_quantity
+                self.logger.info(f"Mise à jour TP LONG avec quantité: {current_quantity}")
+            else:
+                # Ordre SELL exécuté → position SHORT augmentée → mettre à jour TP SHORT
+                tp_side = TPSide.SHORT
+                current_quantity = self.current_short_quantity
+                self.logger.info(f"Mise à jour TP SHORT avec quantité: {current_quantity}")
+            
+            # Mettre à jour le TP avec la nouvelle quantité (pas initial = incrément)
+            success = self.tp_service.create_or_update_tp(
+                side=tp_side,
+                quantity=current_quantity,
+                is_initial=False  # Pas initial → incrément du prix TP
+            )
+            
+            if success:
+                self.logger.info(f"✅ TP {tp_side.value} mis à jour après cascade")
+            else:
+                self.logger.warning(f"⚠️ Échec mise à jour TP {tp_side.value}")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la mise à jour TP après cascade: {e}", exc_info=True)
+    
+    def _create_tp_for_hedge_execution(self, side: str, quantity: float) -> None:
+        """
+        Crée un TP pour la position hedge qui vient de s'exécuter
+        
+        Args:
+            side: Côté de l'ordre hedge exécuté (BUY ou SELL)
+            quantity: Quantité de l'ordre hedge exécuté
+        """
+        self.logger.debug(f"_create_tp_for_hedge_execution called: {side} {quantity}")
+        
+        if not self.tp_service:
+            self.logger.debug("Service TP non disponible")
+            return
+        
+        try:
+            from core.tp_service import TPSide
+            
+            # Déterminer le côté TP à mettre à jour
+            if side == "BUY":
+                # Hedge BUY exécuté → position LONG augmentée → mettre à jour TP LONG
+                tp_side = TPSide.LONG
+                self.logger.info(f"Mise à jour TP LONG après hedge BUY exécuté: {quantity}")
+            else:
+                # Hedge SELL exécuté → position SHORT augmentée → mettre à jour TP SHORT
+                tp_side = TPSide.SHORT
+                self.logger.info(f"Mise à jour TP SHORT après hedge SELL exécuté: {quantity}")
+            
+            # Déterminer si c'est le premier hedge ou une cascade
+            is_first_hedge = self.state == CascadeState.WAITING_HEDGE
+            
+            # Mettre à jour le TP avec la quantité totale actuelle du côté
+            total_quantity = self.current_long_quantity if side == "BUY" else self.current_short_quantity
+            
+            success = self.tp_service.create_or_update_tp(
+                side=tp_side,
+                quantity=total_quantity,
+                is_initial=is_first_hedge  # True pour premier hedge, False pour cascades
+            )
+            
+            if success:
+                action_type = "créé (niveau de base)" if is_first_hedge else "mis à jour (avec incrément)"
+                self.logger.info(f"✅ TP {tp_side.value} {action_type} après exécution hedge (total: {total_quantity})")
+            else:
+                action_type = "création" if is_first_hedge else "mise à jour"
+                self.logger.warning(f"⚠️ Échec {action_type} TP {tp_side.value} après hedge")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la création TP pour hedge: {e}", exc_info=True)
     
     async def _create_next_cascade_order(self) -> None:
         """Crée le prochain ordre cascade selon la logique d'alternance"""
@@ -384,14 +503,17 @@ class CascadeService:
                 self.logger.error("Impossible de formater la quantité cascade")
                 return
             
+            # Formater le prix selon les règles du symbole
+            formatted_stop_price = self._format_cascade_price(stop_price)
+            
             # Créer l'ordre STOP_MARKET
-            self.logger.info(f"📋 Création ordre cascade: {next_side} {formatted_quantity} @ {stop_price}")
+            self.logger.info(f"📋 Création ordre cascade: {next_side} {formatted_quantity} @ {formatted_stop_price}")
             
             cascade_order = self.binance_client.place_stop_market_order(
                 symbol=config.SYMBOL,
                 side=next_side,
                 quantity=formatted_quantity,
-                stop_price=str(stop_price),
+                stop_price=formatted_stop_price,  # Utiliser prix formaté
                 position_side=next_position_side
             )
             
@@ -430,9 +552,37 @@ class CascadeService:
         self.logger.info(f"  Positions: LONG={self.current_long_quantity} SHORT={self.current_short_quantity}")
         self.logger.info(f"  Prix références: LONG={self.initial_long_price} SHORT={self.initial_short_price}")
     
+    def _cache_symbol_precision(self) -> None:
+        """
+        Met en cache les informations de précision pour éviter appels répétés
+        """
+        if not self.trading_service:
+            return
+            
+        symbol = config.SYMBOL
+        
+        # Vérifier si déjà en cache pour ce symbole
+        if self._cached_symbol == symbol and self._symbol_precision_cache:
+            return
+        
+        self.logger.debug(f"Mise en cache des informations de précision pour {symbol}")
+        
+        # Récupérer et mettre en cache
+        precision_info = self.trading_service.get_symbol_precision(symbol)
+        if precision_info:
+            self._symbol_precision_cache = precision_info
+            self._cached_symbol = symbol
+            
+            tick_size = precision_info["price_filter"]["tick_size"]
+            step_size = precision_info["lot_size"]["step_size"]
+            
+            self.logger.info(f"Cache formatage Cascade: tick_size={tick_size}, step_size={step_size}")
+        else:
+            self.logger.warning("Impossible de mettre en cache les informations de précision")
+    
     def _format_cascade_quantity(self, quantity: float) -> Optional[str]:
         """
-        Formate la quantité cascade selon les règles du symbole
+        Formate la quantité cascade avec cache optimisé
         
         Args:
             quantity: Quantité à formater
@@ -443,8 +593,16 @@ class CascadeService:
         self.logger.debug(f"_format_cascade_quantity called: {quantity}")
         
         try:
-            # Utiliser les mêmes règles de formatage que TradingService
-            # Pour simplifier, on va arrondir à 3 décimales pour BTCUSDC
+            # Utiliser le cache optimisé
+            if self._symbol_precision_cache and self.trading_service:
+                step_size = self._symbol_precision_cache["lot_size"]["step_size"]
+                formatted = self.trading_service._format_quantity(quantity, step_size)
+                
+                if float(formatted) <= 0:
+                    return None
+                return formatted
+            
+            # Fallback : formatage fixe
             formatted = f"{quantity:.3f}".rstrip('0').rstrip('.')
             
             if float(formatted) <= 0:
@@ -455,6 +613,31 @@ class CascadeService:
         except Exception as e:
             self.logger.error(f"Erreur formatage quantité cascade: {e}", exc_info=True)
             return None
+    
+    def _format_cascade_price(self, price: float) -> str:
+        """
+        Formate un prix avec cache optimisé
+        
+        Args:
+            price: Prix à formater
+            
+        Returns:
+            Prix formaté
+        """
+        self.logger.debug(f"_format_cascade_price called: {price}")
+        
+        try:
+            # Utiliser le cache optimisé
+            if self._symbol_precision_cache and self.trading_service:
+                tick_size = self._symbol_precision_cache["price_filter"]["tick_size"]
+                return self.trading_service._format_price(price, tick_size)
+            
+            # Fallback : formatage fixe avec 2 décimales
+            return f"{price:.2f}"
+            
+        except Exception as e:
+            self.logger.error(f"Erreur formatage prix cascade: {e}", exc_info=True)
+            return f"{price:.2f}"
     
     def get_cascade_status(self) -> Dict[str, Any]:
         """

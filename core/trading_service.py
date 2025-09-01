@@ -14,14 +14,15 @@ from core.logger import get_module_logger
 class TradingService:
     """Service pour l'exécution des trades"""
     
-    def __init__(self, cascade_service=None) -> None:
+    def __init__(self, cascade_service=None, tp_service=None) -> None:
         """Initialise le service de trading"""
         self.logger = get_module_logger("TradingService")
         self.binance_client = BinanceAPIClient()
         self.market_data_client = MarketDataClient()
         
-        # Référence au service cascade (injection de dépendance)
+        # Référence aux services (injection de dépendance)
         self.cascade_service = cascade_service
+        self.tp_service = tp_service
         
         # Cache des informations de symbole
         self.symbol_info_cache: Dict[str, Dict[str, Any]] = {}
@@ -119,6 +120,99 @@ class TradingService:
         
         self.logger.debug(f"Quantité formatée: {formatted_str}")
         return formatted_str
+    
+    def _extract_price_filter_info(self, symbol_info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extrait les informations PRICE_FILTER du symbole
+        
+        Args:
+            symbol_info: Informations du symbole
+            
+        Returns:
+            Dictionnaire avec min_price, max_price, tick_size
+        """
+        self.logger.debug("_extract_price_filter_info called")
+        
+        filters = symbol_info.get("filters", [])
+        
+        for filter_info in filters:
+            if filter_info.get("filterType") == "PRICE_FILTER":
+                price_filter_info = {
+                    "min_price": float(filter_info.get("minPrice", "0")),
+                    "max_price": float(filter_info.get("maxPrice", "0")),
+                    "tick_size": float(filter_info.get("tickSize", "0"))
+                }
+                
+                self.logger.info(f"PRICE_FILTER: min={price_filter_info['min_price']}, tick={price_filter_info['tick_size']}")
+                return price_filter_info
+        
+        self.logger.error("Filtre PRICE_FILTER non trouvé")
+        return {"min_price": 0, "max_price": 0, "tick_size": 0}
+    
+    def _format_price(self, price: float, tick_size: float) -> str:
+        """
+        Formate un prix selon le tick_size du symbole
+        
+        Args:
+            price: Prix à formater
+            tick_size: Tick size du symbole
+            
+        Returns:
+            Prix formaté
+        """
+        self.logger.debug(f"_format_price called: price={price}, tick={tick_size}")
+        
+        if tick_size == 0:
+            self.logger.error("Tick size est 0 - formatage par défaut")
+            return f"{price:.2f}"
+        
+        # Calculer le nombre de décimales basé sur le tick_size
+        tick_decimal = Decimal(str(tick_size))
+        exponent = tick_decimal.as_tuple().exponent
+        
+        # Gérer le type de l'exposant (peut être int ou str)
+        if isinstance(exponent, int):
+            decimal_places = abs(exponent)
+        else:
+            # Si c'est 'n', 'N', ou 'F', utiliser 2 décimales par défaut
+            decimal_places = 2
+        
+        # Arrondir le prix selon le tick_size
+        price_decimal = Decimal(str(price))
+        tick_decimal_places = Decimal(str(tick_size))
+        
+        # Arrondir vers le bas (ROUND_DOWN) pour éviter les erreurs de prix
+        formatted_price = price_decimal.quantize(tick_decimal_places, rounding=ROUND_DOWN)
+        
+        # Formater en string
+        formatted_str = f"{formatted_price:.{decimal_places}f}"
+        
+        self.logger.debug(f"Prix formaté: {formatted_str}")
+        return formatted_str
+    
+    def get_symbol_precision(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Récupère les informations de précision d'un symbole
+        
+        Args:
+            symbol: Symbole à analyser
+            
+        Returns:
+            Dict avec lot_size_info et price_filter_info
+        """
+        self.logger.debug(f"get_symbol_precision called for {symbol}")
+        
+        symbol_info = self._get_symbol_info(symbol)
+        if not symbol_info:
+            return None
+        
+        lot_size_info = self._extract_lot_size_info(symbol_info)
+        price_filter_info = self._extract_price_filter_info(symbol_info)
+        
+        return {
+            "lot_size": lot_size_info,
+            "price_filter": price_filter_info
+        }
     
     def preload_symbol_info(self, symbol: str) -> bool:
         """
@@ -260,6 +354,11 @@ class TradingService:
                 # Ajouter les informations de hedge au résultat
                 order_result["hedge_order"] = hedge_result
                 
+                # Démarrer le système TP si hedge créé avec succès et TP service disponible
+                if hedge_result and self.tp_service and config.TP_CONFIG["ENABLED"]:
+                    self.logger.info("🎯 Démarrage du système TP")
+                    self._initialize_tp_system(order_result, hedge_result)
+                
                 # Démarrer la cascade si hedge créé avec succès et cascade service disponible
                 if hedge_result and self.cascade_service and config.CASCADE_CONFIG["ENABLED"]:
                     self.logger.info("🔄 Démarrage du système cascade")
@@ -273,6 +372,129 @@ class TradingService:
         except Exception as e:
             self.logger.error(f"Erreur lors de l'exécution du trade: {e}", exc_info=True)
             return None
+    
+    def _initialize_tp_system(
+        self, 
+        initial_order: Dict[str, Any], 
+        hedge_order: Dict[str, Any]
+    ) -> None:
+        """
+        Initialise le système TP avec les prix d'exécution et de hedge
+        
+        Args:
+            initial_order: Résultat de l'ordre initial
+            hedge_order: Résultat de l'ordre hedge
+        """
+        self.logger.debug("_initialize_tp_system called")
+        
+        try:
+            # Extraire le prix d'exécution de l'ordre initial (MARKET)
+            initial_price = 0.0
+            
+            # Essayer les différentes sources de prix pour l'ordre initial
+            fills = initial_order.get("fills", [])
+            if fills and len(fills) > 0:
+                initial_price = float(fills[0].get("price", "0"))
+            
+            if initial_price == 0.0:
+                avg_price = initial_order.get("avgPrice", "0")
+                if avg_price and avg_price != "0":
+                    initial_price = float(avg_price)
+            
+            # Si toujours 0, essayer de récupérer via l'API
+            if initial_price == 0.0:
+                order_id = initial_order.get("orderId")
+                if order_id:
+                    self.logger.info(f"Récupération prix initial via API - Order ID: {order_id}")
+                    order_status = self.binance_client.get_order_status(config.SYMBOL, int(order_id))
+                    if order_status:
+                        api_price = order_status.get("avgPrice", "0")
+                        if api_price and api_price != "0":
+                            initial_price = float(api_price)
+                            self.logger.info(f"Prix initial récupéré via API: {initial_price}")
+                        else:
+                            self.logger.warning("Prix avgPrice non disponible via API")
+            
+            # Pour l'ordre hedge STOP_MARKET, utiliser le stopPrice
+            hedge_stop_price = float(hedge_order.get("stopPrice", "0"))
+            
+            self.logger.info(f"Prix pour TP - Initial: {initial_price}, Hedge stop: {hedge_stop_price}")
+            
+            if initial_price == 0.0 or hedge_stop_price == 0.0:
+                self.logger.error(f"Prix invalides pour initialisation TP - Initial: {initial_price}, Hedge: {hedge_stop_price}")
+                return
+            
+            # Vérifier que le service TP est disponible
+            if self.tp_service is None:
+                self.logger.warning("Service TP non disponible - initialisation ignorée")
+                return
+            
+            # Initialiser les niveaux TP dans le service
+            self.tp_service.initialize_tp_levels(initial_price, hedge_stop_price)
+            
+            # Créer le TP pour la position initiale
+            initial_side = initial_order.get("side", "").upper()
+            
+            # Extraire la quantité avec fallback
+            initial_quantity = 0.0
+            
+            # Essayer executedQty d'abord
+            executed_qty = initial_order.get("executedQty", "0")
+            if executed_qty and executed_qty != "0":
+                initial_quantity = float(executed_qty)
+            
+            # Si 0, essayer via les fills
+            if initial_quantity == 0.0 and fills:
+                fill_qty = fills[0].get("qty", "0")
+                if fill_qty and fill_qty != "0":
+                    initial_quantity = float(fill_qty)
+            
+            # Si toujours 0, récupérer via API
+            if initial_quantity == 0.0:
+                order_id = initial_order.get("orderId")
+                if order_id:
+                    self.logger.info(f"Récupération quantité initiale via API - Order ID: {order_id}")
+                    order_status = self.binance_client.get_order_status(config.SYMBOL, int(order_id))
+                    if order_status:
+                        api_qty = order_status.get("executedQty", "0")
+                        if api_qty and api_qty != "0":
+                            initial_quantity = float(api_qty)
+                            self.logger.info(f"Quantité initiale récupérée via API: {initial_quantity}")
+                        else:
+                            self.logger.warning("Quantité executedQty non disponible via API")
+            
+            self.logger.info(f"Quantité pour TP initial: {initial_quantity}")
+            
+            if initial_quantity == 0.0:
+                self.logger.error("Quantité invalide pour TP - abandon initialisation")
+                return
+            
+            # Créer TP SEULEMENT pour l'ordre initial (position réelle)
+            from core.tp_service import TPSide
+            
+            # Déterminer le côté TP pour la position initiale
+            if initial_side == "BUY":
+                initial_tp_side = TPSide.LONG
+            else:
+                initial_tp_side = TPSide.SHORT
+            
+            # Créer TP uniquement pour la position initiale exécutée
+            success_initial = self.tp_service.create_or_update_tp(
+                initial_tp_side, 
+                initial_quantity, 
+                is_initial=True
+            )
+            
+            if success_initial:
+                self.logger.info(f"TP {initial_tp_side.value} créé pour position initiale: {initial_quantity}")
+            else:
+                self.logger.error(f"Échec création TP {initial_tp_side.value} initial")
+            
+            # Le TP pour le hedge sera créé SEULEMENT quand le hedge s'exécute
+            self.logger.info("TP hedge sera créé lors de l'exécution réelle du hedge STOP_MARKET")
+                    
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'initialisation TP: {e}", exc_info=True)
     
     def format_trade_display(self, signal: Dict[str, Any], order_result: Dict[str, Any]) -> str:
         """

@@ -353,3 +353,116 @@ class BinanceAPIClient:
         except Exception as e:
             self.logger.error(f"Erreur lors de la récupération du statut d'ordre: {e}", exc_info=True)
             return None
+    
+    def place_take_profit_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: str,
+        stop_price: str,
+        price: str,
+        position_side: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Place un ordre TAKE_PROFIT sur Binance Futures
+        
+        Args:
+            symbol: Symbole de trading
+            side: BUY ou SELL
+            quantity: Quantité à trader
+            stop_price: Prix de déclenchement du TP
+            price: Prix limite pour l'ordre
+            position_side: LONG ou SHORT (requis en mode Hedge)
+            
+        Returns:
+            Réponse de l'ordre ou None
+        """
+        self.logger.debug(f"place_take_profit_order called: {symbol} {side} {quantity} @ stop:{stop_price} limit:{price}")
+        self.logger.info(f"Placement ordre TAKE_PROFIT {side} {quantity} {symbol} @ {stop_price}/{price}")
+        
+        try:
+            endpoint = "/fapi/v1/order"
+            timestamp = int(time.time() * 1000)
+            
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "side": side,
+                "type": "TAKE_PROFIT",
+                "quantity": quantity,
+                "stopPrice": stop_price,
+                "price": price,
+                "positionSide": position_side,
+                "timestamp": timestamp
+            }
+            
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+            
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            response = requests.post(
+                f"{self.base_url}{endpoint}",
+                params=params,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                order_data = response.json()
+                self.logger.info(f"Ordre TAKE_PROFIT placé avec succès: {order_data.get('orderId')}")
+                return order_data
+            else:
+                self.logger.error(f"Erreur placement TAKE_PROFIT: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors du placement TAKE_PROFIT: {e}", exc_info=True)
+            return None
+    
+    def cancel_order(self, symbol: str, order_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Annule un ordre spécifique
+        
+        Args:
+            symbol: Symbole de trading
+            order_id: ID de l'ordre à annuler
+            
+        Returns:
+            Résultat de l'annulation ou None
+        """
+        self.logger.debug(f"cancel_order called: {symbol} {order_id}")
+        self.logger.info(f"Annulation ordre {order_id} sur {symbol}")
+        
+        try:
+            endpoint = "/fapi/v1/order"
+            timestamp = int(time.time() * 1000)
+            
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "orderId": order_id,
+                "timestamp": timestamp
+            }
+            
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+            
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            response = requests.delete(
+                f"{self.base_url}{endpoint}",
+                params=params,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                cancel_data = response.json()
+                self.logger.info(f"Ordre {order_id} annulé avec succès")
+                return cancel_data
+            else:
+                self.logger.error(f"Erreur annulation ordre: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'annulation d'ordre: {e}", exc_info=True)
+            return None

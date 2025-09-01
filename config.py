@@ -49,6 +49,14 @@ CASCADE_CONFIG: Dict[str, Any] = {
     "RETRY_DELAY_SECONDS": 5,  # Délai entre les tentatives de retry
 }
 
+# Configuration du système Take Profit
+TP_CONFIG: Dict[str, Any] = {
+    "ENABLED": True,  # Activer/désactiver le système TP
+    "MULTIPLIER": 2.0,  # Multiplicateur pour la distance TP (distance = différence prix * multiplier)
+    "INCREMENT_PERCENT": 0.001,  # Incrément de 0.1% à chaque ordre cascade
+    "PRICE_OFFSET": 0.001,  # Offset entre stopPrice et price pour l'ordre limite (0.1%)
+}
+
 # Configuration du système de logging
 LOGGING_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver le logging
