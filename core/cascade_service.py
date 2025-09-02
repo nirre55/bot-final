@@ -707,6 +707,8 @@ class CascadeService:
             # Créer/mettre à jour les TP pour hedge
             if self.tp_service and config.TP_CONFIG["ENABLED"]:
                 self._create_tp_for_hedge_execution(side, quantity)
+                # Mettre à jour TOUS les TP avec +0.1% après exécution hedge
+                self._update_tp_after_cascade(side)
             
             # Passer en mode cascade active
             self.state = CascadeState.ACTIVE
