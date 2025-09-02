@@ -20,6 +20,7 @@ from core.trading_service import TradingService
 from core.cascade_service import CascadeService
 from core.tp_service import TPService
 from websocket.websocket_manager import WebSocketManager
+from websocket.user_data_manager import UserDataStreamManager
 
 # Configuration de l'encodage pour Windows
 if sys.platform == "win32":
@@ -58,10 +59,15 @@ class BinanceTradingBot:
         self.cached_ha_data: Optional[Dict[str, str]] = None
         self.rsi_displayed_for_current_candle: bool = False
         self.shutdown_requested: bool = False
+        self._signal_count: int = 0
         
         # Le WebSocket manager sera initialisé avec un handler de messages
         self.websocket_manager: WebSocketManager
         self._init_websocket_manager()
+        
+        # User Data Stream WebSocket pour les exécutions d'ordres
+        self.user_data_manager: UserDataStreamManager
+        self._init_user_data_manager()
         
         self.logger.info("Bot de trading initialisé avec tous ses composants")
         
@@ -71,6 +77,10 @@ class BinanceTradingBot:
     def _init_websocket_manager(self) -> None:
         """Initialise le gestionnaire WebSocket avec le handler de messages"""
         self.websocket_manager = WebSocketManager(self._handle_kline_message)
+    
+    def _init_user_data_manager(self) -> None:
+        """Initialise le gestionnaire User Data Stream pour les exécutions d'ordres"""
+        self.user_data_manager = UserDataStreamManager(self._handle_order_execution)
     
     def _preload_symbol_information(self) -> None:
         """Précharge les informations du symbole de trading au démarrage"""
@@ -251,6 +261,16 @@ class BinanceTradingBot:
             tp_display = self.tp_service.format_tp_display()
             if tp_display:
                 print(f"{tp_display}")
+            
+            # Vérifier si des TP ont été exécutés et effectuer le nettoyage automatique
+            executed_tp = self.tp_service.check_tp_execution_and_cleanup()
+            if executed_tp:
+                print(f"🎯 TP {executed_tp} EXÉCUTÉ - Reset complet en cours...")
+                # Notifier le service cascade qu'un TP a été exécuté (fermeture complète)
+                self.cascade_service.handle_tp_execution(executed_tp)
+                # Reset du service de signaux pour permettre nouveau cycle
+                self.signal_service.reset_signal()
+                print("✅ SYSTÈME RÉINITIALISÉ - Prêt pour nouveau signal")
                 
         except Exception as e:
             self.logger.error(f"Erreur lors de la détection de signaux: {e}", exc_info=True)
@@ -278,6 +298,22 @@ class BinanceTradingBot:
             self.logger.error(f"Erreur lors de l'exécution du trade: {e}", exc_info=True)
             print("❌ ERREUR: Problème lors de l'exécution du trade")
     
+    def _handle_order_execution(self, execution_data: Dict[str, Any]) -> None:
+        """
+        Traite les exécutions d'ordres reçues du User Data Stream
+        
+        Args:
+            execution_data: Données d'exécution du WebSocket
+        """
+        self.logger.debug("_handle_order_execution called")
+        
+        try:
+            # Transmettre à CascadeService pour traitement
+            self.cascade_service.handle_order_execution_from_websocket(execution_data)
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors du traitement de l'exécution d'ordre: {e}", exc_info=True)
+    
     def _display_account_balance(self) -> None:
         """Récupère et affiche la balance du compte"""
         self.logger.debug("_display_account_balance called")
@@ -289,7 +325,30 @@ class BinanceTradingBot:
         def signal_handler(signum: int, frame: Any) -> None:
             self.logger.info(f"Signal {signum} reçu - arrêt demandé")
             self.shutdown_requested = True
+            
+            # Arrêter les deux WebSocket managers
             self.websocket_manager.stop()
+            
+            # Pour le User Data Stream, déclencher l'arrêt
+            if hasattr(self, 'user_data_manager'):
+                # Créer une tâche pour l'arrêt async du user data manager
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(self.user_data_manager.stop())
+                except Exception as e:
+                    self.logger.warning(f"Erreur arrêt user data manager: {e}")
+                    self.user_data_manager.is_running = False
+                
+            print("\n[SIGNAL] Arrêt en cours...")
+            
+            # Sur Windows, forcer l'arrêt après plusieurs signaux
+            self._signal_count += 1
+            
+            if self._signal_count >= 3:
+                print("\n[FORCE] Arrêt forcé après 3 signaux")
+                import os
+                os._exit(1)
         
         # Gestion des signaux sur Unix/Linux/Mac
         if hasattr(signal, 'SIGINT'):
@@ -325,7 +384,22 @@ class BinanceTradingBot:
             stream = f"{config.SYMBOL.lower()}@kline_{config.TIMEFRAME}"
             uri = f"{config.WEBSOCKET_URL}{stream}"
             
-            await self.websocket_manager.connect(uri)
+            # Démarrer les deux WebSocket en parallèle
+            tasks = [
+                asyncio.create_task(self.websocket_manager.connect(uri)),
+                asyncio.create_task(self.user_data_manager.start())
+            ]
+            
+            try:
+                # Attendre que toutes les tâches se terminent ou qu'une exception soit levée
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except KeyboardInterrupt:
+                # Annuler toutes les tâches
+                for task in tasks:
+                    task.cancel()
+                # Attendre que les tâches se terminent proprement
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
         except KeyboardInterrupt:
             self.logger.info("Arrêt du bot demandé par l'utilisateur")
@@ -334,9 +408,10 @@ class BinanceTradingBot:
             self.logger.error(f"Erreur lors de l'exécution du bot: {e}", exc_info=True)
             print(f"\nErreur lors de l'exécution du bot: {e}")
         finally:
-            # Arrêt propre du WebSocket manager
+            # Arrêt propre des WebSocket managers
             self.logger.info("Nettoyage final et fermeture du bot")
             self.websocket_manager.stop()
+            await self.user_data_manager.stop()
             # Attendre un moment pour que les connexions se ferment proprement
             await asyncio.sleep(1)
             self.display.display_shutdown_info()

@@ -33,7 +33,6 @@ class CascadeService:
         
         # État du système cascade
         self.state: CascadeState = CascadeState.INACTIVE
-        self.is_polling: bool = False
         
         # Prix de référence (définis lors du trade initial + hedge)
         self.initial_long_price: Optional[float] = None
@@ -60,6 +59,66 @@ class CascadeService:
         self._cached_symbol: Optional[str] = None
         
         self.logger.debug("CascadeService initialisé")
+    
+    def handle_order_execution_from_websocket(self, execution_data: Dict[str, Any]) -> None:
+        """
+        Gère les exécutions d'ordres reçues via WebSocket User Data Stream
+        
+        Args:
+            execution_data: Données d'exécution du WebSocket
+        """
+        self.logger.debug("handle_order_execution_from_websocket called")
+        
+        try:
+            order_id = str(execution_data.get("i"))  # Order ID
+            symbol = execution_data.get("s")         # Symbol
+            side = execution_data.get("S")           # Side (BUY/SELL)
+            executed_qty = float(execution_data.get("z", "0"))  # Executed quantity (cumulative)
+            execution_price = float(execution_data.get("L", "0"))  # Last executed price
+            order_status = execution_data.get("X", "UNKNOWN")  # Order status
+            position_side = execution_data.get("ps", "BOTH")  # Position side
+            
+            self.logger.info(f"📨 WebSocket: Ordre {order_status} {symbol} {side} {executed_qty} @ {execution_price} ID:{order_id}")
+            self.logger.info(f"🎯 État cascade actuel: {self.state}, Hedge order: {self.initial_hedge_order}")
+            
+            # Vérifier si c'est notre symbole
+            if symbol != config.SYMBOL:
+                self.logger.debug(f"Ordre non concerné (symbole différent): {symbol}")
+                return
+                
+            # Ne traiter que les ordres FILLED
+            if order_status != "FILLED":
+                self.logger.debug(f"Ordre non FILLED ignoré: {order_status} ID:{order_id}")
+                return
+            
+            # Vérifier que les données critiques ne sont pas None
+            if not side or executed_qty is None or execution_price is None:
+                self.logger.error(f"Données d'exécution incomplètes: side={side}, qty={executed_qty}, price={execution_price}")
+                return
+            
+            # Traiter selon le type d'ordre
+            if self._is_hedge_order(order_id):
+                self.logger.info("🎯 Ordre hedge initial détecté - Traitement en cours...")
+                self.logger.info(f"State cascade: {self.state}")
+                self.logger.info(f"Hedge order défini: {self.initial_hedge_order}")
+                
+                # Traitement immédiat du hedge en mode async
+                asyncio.create_task(self._process_hedge_execution_async(side, executed_qty, execution_price))
+                
+            elif self._is_cascade_order(order_id):
+                self.logger.info("🔄 Ordre cascade détecté")
+                
+                # Traitement immédiat du cascade en mode async
+                asyncio.create_task(self._process_cascade_execution_async(side, executed_qty, execution_price, order_id))
+                
+            else:
+                self.logger.info(f"❓ Ordre non suivi par le système cascade: {order_id}")
+                self.logger.info(f"📊 État cascade: {self.state}")
+                self.logger.info(f"📋 Hedge order: {self.initial_hedge_order}")
+                self.logger.info(f"📋 Pending orders count: {len(self.pending_orders)}")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors du traitement exécution WebSocket: {e}", exc_info=True)
     
     def set_trading_service_reference(self, trading_service) -> None:
         """
@@ -131,12 +190,9 @@ class CascadeService:
             # Démarrer en mode attente hedge
             self.state = CascadeState.WAITING_HEDGE
             
-            self.logger.info(f"🔄 Cascade démarrée - Prix ref: LONG={self.initial_long_price}, SHORT={self.initial_short_price}")
+            self.logger.info("✅ Cascade initialisée - En attente d'exécution via WebSocket")
+            self.logger.info(f"🔄 Prix de référence: LONG={self.initial_long_price}, SHORT={self.initial_short_price}")
             self.logger.info(f"Positions: LONG={self.current_long_quantity}, SHORT={self.current_short_quantity}")
-            
-            # Démarrer le polling des ordres si pas déjà actif
-            if not self.is_polling:
-                asyncio.create_task(self._start_order_polling())
             
         except Exception as e:
             self.logger.error(f"Erreur lors du démarrage cascade: {e}", exc_info=True)
@@ -158,69 +214,35 @@ class CascadeService:
         
         self.logger.info("État cascade réinitialisé")
     
-    async def _start_order_polling(self) -> None:
-        """Démarre le polling des ordres en arrière-plan"""
-        self.logger.debug("_start_order_polling called")
-        self.logger.info("Démarrage du polling des ordres cascade")
-        
-        self.is_polling = True
-        polling_interval = config.CASCADE_CONFIG["POLLING_INTERVAL_SECONDS"]
-        
-        try:
-            while self.is_cascade_active():
-                await self._check_and_process_orders()
-                await asyncio.sleep(polling_interval)
-            
-        except Exception as e:
-            self.logger.error(f"Erreur dans le polling des ordres: {e}", exc_info=True)
-        finally:
-            self.is_polling = False
-            self.logger.info("Polling des ordres cascade arrêté")
-    
-    async def _check_and_process_orders(self) -> None:
-        """Vérifie les ordres en attente et traite les exécutions"""
-        self.logger.debug("_check_and_process_orders called")
-        
-        try:
-            if self.state == CascadeState.WAITING_HEDGE:
-                await self._check_initial_hedge()
-            elif self.state == CascadeState.ACTIVE:
-                await self._check_cascade_orders()
-                
-        except Exception as e:
-            self.logger.error(f"Erreur lors de la vérification des ordres: {e}", exc_info=True)
-    
-    async def _retrieve_initial_order_price(self) -> None:
-        """Récupère le prix d'exécution de l'ordre initial"""
-        self.logger.debug("_retrieve_initial_order_price called")
-        
+    async def _retrieve_initial_order_price_async(self) -> None:
+        """Récupère le prix d'exécution de l'ordre initial (version async)"""
         if not self.initial_order_info:
             return
-        
-        # Vérifier si le prix est déjà défini
+
+        # Vérifier si les prix sont déjà définis
         order_side = self.initial_order_info.get("side")
         if order_side == "BUY" and self.initial_long_price is not None:
             return  # Prix LONG déjà défini
         elif order_side == "SELL" and self.initial_short_price is not None:
             return  # Prix SHORT déjà défini
-        
+
         try:
             order_id = self.initial_order_info.get("id")
             symbol = self.initial_order_info.get("symbol")
-            
+
             if not order_id or not symbol:
                 self.logger.error("Informations ordre initial manquantes")
                 return
-            
+
             # Récupérer le statut de l'ordre initial
             order_status = self.binance_client.get_order_status(symbol, int(order_id))
-            
+
             if order_status and order_status.get("status") == "FILLED":
                 executed_price = float(order_status.get("avgPrice", "0"))
                 executed_qty = float(order_status.get("executedQty", "0"))
-                
+
                 self.logger.info(f"✅ Prix ordre initial récupéré: {order_side} {executed_qty} @ {executed_price}")
-                
+
                 # Définir le prix et la quantité selon le côté
                 if order_side == "BUY":
                     self.initial_long_price = executed_price
@@ -230,151 +252,13 @@ class CascadeService:
                     self.initial_short_price = executed_price
                     self.current_short_quantity = executed_qty
                     self.logger.info(f"Prix SHORT initial défini via API: {executed_price}")
-                    
+
         except Exception as e:
             self.logger.error(f"Erreur lors de la récupération du prix initial: {e}", exc_info=True)
     
-    async def _check_initial_hedge(self) -> None:
-        """Vérifie si l'ordre hedge initial s'est exécuté et récupère les prix"""
-        self.logger.debug("_check_initial_hedge called")
-        
-        if not self.initial_hedge_order or not self.initial_order_info:
-            return
-        
-        try:
-            # D'abord récupérer le prix de l'ordre initial s'il n'est pas encore défini
-            await self._retrieve_initial_order_price()
-            
-            # Puis vérifier le statut de l'ordre hedge
-            order_id = self.initial_hedge_order.get("orderId")
-            symbol = self.initial_hedge_order.get("symbol", config.SYMBOL)
-            
-            if not order_id:
-                self.logger.error("ID d'ordre hedge manquant")
-                return
-            
-            order_status = self.binance_client.get_order_status(symbol, int(order_id))
-            
-            if order_status and order_status.get("status") == "FILLED":
-                # Hedge exécuté !
-                executed_price = float(order_status.get("avgPrice", "0"))
-                executed_qty = float(order_status.get("executedQty", "0"))
-                side = order_status.get("side", "").upper()
-                
-                self.logger.info(f"✅ Hedge initial exécuté: {side} {executed_qty} @ {executed_price}")
-                
-                # Définir le prix de référence manquant et mettre à jour les quantités
-                if side == "BUY":
-                    # Hedge BUY exécuté → définir le prix LONG de référence 
-                    if self.initial_long_price is None:
-                        self.initial_long_price = executed_price
-                        self.logger.info(f"Prix LONG hedge défini: {executed_price}")
-                    self.current_long_quantity += executed_qty
-                else:
-                    # Hedge SELL exécuté → définir le prix SHORT de référence
-                    if self.initial_short_price is None:
-                        self.initial_short_price = executed_price
-                        self.logger.info(f"Prix SHORT hedge défini: {executed_price}")
-                    self.current_short_quantity += executed_qty
-                
-                # Créer le TP pour la position hedge si service TP disponible
-                if self.tp_service and config.TP_CONFIG["ENABLED"]:
-                    self._create_tp_for_hedge_execution(side, executed_qty)
-                
-                # Passer en mode cascade active
-                self.state = CascadeState.ACTIVE
-                self.initial_hedge_order = None
-                
-                # Créer le premier ordre cascade
-                await self._create_next_cascade_order()
-                
-        except Exception as e:
-            self.logger.error(f"Erreur lors de la vérification du hedge initial: {e}", exc_info=True)
-    
-    async def _check_cascade_orders(self) -> None:
-        """Vérifie les ordres cascade en attente"""
-        self.logger.debug("_check_cascade_orders called")
-        
-        if not self.pending_orders:
-            return
-        
-        orders_to_remove = []
-        
-        for pending_order in self.pending_orders[:]:  # Copie pour itération sûre
-            try:
-                order_id = pending_order.get("orderId")
-                symbol = pending_order.get("symbol", config.SYMBOL)
-                
-                if not order_id:
-                    self.logger.error("ID d'ordre cascade manquant")
-                    orders_to_remove.append(pending_order)
-                    continue
-                
-                order_status = self.binance_client.get_order_status(symbol, int(order_id))
-                
-                if order_status and order_status.get("status") == "FILLED":
-                    # Ordre exécuté !
-                    await self._process_cascade_order_execution(pending_order, order_status)
-                    orders_to_remove.append(pending_order)
-                    
-                elif order_status and order_status.get("status") in ["CANCELED", "REJECTED"]:
-                    # Ordre annulé ou rejeté
-                    self.logger.warning(f"Ordre cascade {order_id} annulé/rejeté: {order_status.get('status')}")
-                    orders_to_remove.append(pending_order)
-                    
-            except Exception as e:
-                order_id_str = str(order_id) if order_id else "inconnu"
-                self.logger.error(f"Erreur lors de la vérification de l'ordre {order_id_str}: {e}", exc_info=True)
-        
-        # Supprimer les ordres traités
-        for order in orders_to_remove:
-            self.pending_orders.remove(order)
-    
-    async def _process_cascade_order_execution(
-        self, 
-        pending_order: Dict[str, Any], 
-        executed_order: Dict[str, Any]
-    ) -> None:
-        """
-        Traite l'exécution d'un ordre cascade
-        
-        Args:
-            pending_order: Ordre en attente qui s'est exécuté
-            executed_order: Détails de l'exécution
-        """
-        self.logger.debug("_process_cascade_order_execution called")
-        
-        try:
-            side = executed_order.get("side", "").upper()
-            executed_qty = float(executed_order.get("executedQty", "0"))
-            executed_price = float(executed_order.get("avgPrice", "0"))
-            
-            # Mettre à jour les quantités
-            if side == "BUY":
-                self.current_long_quantity += executed_qty
-            else:
-                self.current_short_quantity += executed_qty
-            
-            self.logger.info(f"🔄 Ordre cascade exécuté: {side} {executed_qty} @ {executed_price}")
-            self.logger.info(f"Positions totales: LONG={self.current_long_quantity}, SHORT={self.current_short_quantity}")
-            
-            # Mettre à jour les TP si le service TP est disponible
-            if self.tp_service and config.TP_CONFIG["ENABLED"]:
-                self._update_tp_after_cascade(side)
-            
-            # Créer le prochain ordre cascade si limite pas atteinte
-            if self.cascade_orders_count < config.CASCADE_CONFIG["MAX_ORDERS"]:
-                await self._create_next_cascade_order()
-            else:
-                self.logger.info(f"🛑 Limite cascade atteinte ({config.CASCADE_CONFIG['MAX_ORDERS']} ordres)")
-                self.state = CascadeState.STOPPED
-                
-        except Exception as e:
-            self.logger.error(f"Erreur lors du traitement de l'exécution cascade: {e}", exc_info=True)
-    
     def _update_tp_after_cascade(self, executed_side: str) -> None:
         """
-        Met à jour les ordres TP après l'exécution d'un ordre cascade
+        Met à jour TOUS les TP actifs avec +0.1% après l'exécution d'un ordre cascade
         
         Args:
             executed_side: Côté de l'ordre cascade exécuté (BUY ou SELL)
@@ -388,36 +272,40 @@ class CascadeService:
         try:
             from core.tp_service import TPSide
             
-            # Déterminer quel côté TP mettre à jour
-            if executed_side == "BUY":
-                # Ordre BUY exécuté → position LONG augmentée → mettre à jour TP LONG
-                tp_side = TPSide.LONG
-                current_quantity = self.current_long_quantity
-                self.logger.info(f"Mise à jour TP LONG avec quantité: {current_quantity}")
-            else:
-                # Ordre SELL exécuté → position SHORT augmentée → mettre à jour TP SHORT
-                tp_side = TPSide.SHORT
-                current_quantity = self.current_short_quantity
-                self.logger.info(f"Mise à jour TP SHORT avec quantité: {current_quantity}")
+            self.logger.info(f"🔄 Cascade {executed_side} exécutée - Mise à jour TOUS les TP avec +0.1%")
             
-            # Mettre à jour le TP avec la nouvelle quantité (pas initial = incrément)
-            success = self.tp_service.create_or_update_tp(
-                side=tp_side,
-                quantity=current_quantity,
-                is_initial=False  # Pas initial → incrément du prix TP
-            )
+            # Mettre à jour TP LONG s'il existe et qu'on a une position LONG
+            if self.current_long_quantity > 0:
+                success_long = self.tp_service.create_or_update_tp(
+                    side=TPSide.LONG,
+                    quantity=self.current_long_quantity,
+                    is_initial=False  # False = avec incrément +0.1%
+                )
+                
+                if success_long:
+                    self.logger.info(f"✅ TP LONG mis à jour avec +0.1% après cascade (quantité: {self.current_long_quantity})")
+                else:
+                    self.logger.warning(f"⚠️ Échec mise à jour TP LONG après cascade")
             
-            if success:
-                self.logger.info(f"✅ TP {tp_side.value} mis à jour après cascade")
-            else:
-                self.logger.warning(f"⚠️ Échec mise à jour TP {tp_side.value}")
+            # Mettre à jour TP SHORT s'il existe et qu'on a une position SHORT
+            if self.current_short_quantity > 0:
+                success_short = self.tp_service.create_or_update_tp(
+                    side=TPSide.SHORT,
+                    quantity=self.current_short_quantity,
+                    is_initial=False  # False = avec décrémentation -0.1%
+                )
+                
+                if success_short:
+                    self.logger.info(f"✅ TP SHORT mis à jour avec -0.1% après cascade (quantité: {self.current_short_quantity})")
+                else:
+                    self.logger.warning(f"⚠️ Échec mise à jour TP SHORT après cascade")
                 
         except Exception as e:
             self.logger.error(f"Erreur lors de la mise à jour TP après cascade: {e}", exc_info=True)
     
     def _create_tp_for_hedge_execution(self, side: str, quantity: float) -> None:
         """
-        Crée un TP pour la position hedge qui vient de s'exécuter
+        Met à jour les TP quand le hedge s'exécute : TP existant +0.1% et nouveau TP hedge
         
         Args:
             side: Côté de l'ordre hedge exécuté (BUY ou SELL)
@@ -432,37 +320,50 @@ class CascadeService:
         try:
             from core.tp_service import TPSide
             
-            # Déterminer le côté TP à mettre à jour
+            self.logger.info(f"🔄 Hedge {side} exécuté - Mise à jour TP avec increment +0.1%")
+            
             if side == "BUY":
-                # Hedge BUY exécuté → position LONG augmentée → mettre à jour TP LONG
-                tp_side = TPSide.LONG
-                self.logger.info(f"Mise à jour TP LONG après hedge BUY exécuté: {quantity}")
+                # Hedge BUY exécuté → position LONG augmentée
+                existing_tp_side = TPSide.SHORT  # TP existant (si on avait SHORT initial)
+                new_tp_side = TPSide.LONG        # Nouveau TP pour position LONG du hedge
+                existing_quantity = self.current_short_quantity
+                new_quantity = self.current_long_quantity
+                
             else:
-                # Hedge SELL exécuté → position SHORT augmentée → mettre à jour TP SHORT
-                tp_side = TPSide.SHORT
-                self.logger.info(f"Mise à jour TP SHORT après hedge SELL exécuté: {quantity}")
+                # Hedge SELL exécuté → position SHORT augmentée  
+                existing_tp_side = TPSide.LONG   # TP existant (si on avait LONG initial)
+                new_tp_side = TPSide.SHORT       # Nouveau TP pour position SHORT du hedge
+                existing_quantity = self.current_long_quantity
+                new_quantity = self.current_short_quantity
             
-            # Déterminer si c'est le premier hedge ou une cascade
-            is_first_hedge = self.state == CascadeState.WAITING_HEDGE
+            # 1. Mettre à jour le TP existant avec +0.1% (incrément)
+            if existing_quantity > 0:
+                success_existing = self.tp_service.create_or_update_tp(
+                    side=existing_tp_side,
+                    quantity=existing_quantity,
+                    is_initial=False  # False = avec incrément +0.1%
+                )
+                
+                if success_existing:
+                    self.logger.info(f"✅ TP {existing_tp_side.value} existant mis à jour avec +0.1% (quantité: {existing_quantity})")
+                else:
+                    self.logger.warning(f"⚠️ Échec mise à jour TP {existing_tp_side.value} existant")
             
-            # Mettre à jour le TP avec la quantité totale actuelle du côté
-            total_quantity = self.current_long_quantity if side == "BUY" else self.current_short_quantity
-            
-            success = self.tp_service.create_or_update_tp(
-                side=tp_side,
-                quantity=total_quantity,
-                is_initial=is_first_hedge  # True pour premier hedge, False pour cascades
-            )
-            
-            if success:
-                action_type = "créé (niveau de base)" if is_first_hedge else "mis à jour (avec incrément)"
-                self.logger.info(f"✅ TP {tp_side.value} {action_type} après exécution hedge (total: {total_quantity})")
-            else:
-                action_type = "création" if is_first_hedge else "mise à jour"
-                self.logger.warning(f"⚠️ Échec {action_type} TP {tp_side.value} après hedge")
+            # 2. Créer TP pour le nouveau côté hedge avec -0.1% 
+            if new_quantity > 0:
+                success_new = self.tp_service.create_or_update_tp(
+                    side=new_tp_side,
+                    quantity=new_quantity,
+                    is_initial=False  # False = avec décrémentation -0.1% pour le côté opposé
+                )
+                
+                if success_new:
+                    self.logger.info(f"✅ TP {new_tp_side.value} créé pour hedge avec -0.1% (quantité: {new_quantity})")
+                else:
+                    self.logger.warning(f"⚠️ Échec création TP {new_tp_side.value} pour hedge")
                 
         except Exception as e:
-            self.logger.error(f"Erreur lors de la création TP pour hedge: {e}", exc_info=True)
+            self.logger.error(f"Erreur lors de la mise à jour TP pour hedge: {e}", exc_info=True)
     
     async def _create_next_cascade_order(self) -> None:
         """Crée le prochain ordre cascade selon la logique d'alternance"""
@@ -532,7 +433,7 @@ class CascadeService:
     
     def _handle_cascade_order_failure(self, side: str, quantity: str, stop_price: float) -> None:
         """
-        Gère les échecs de création d'ordres cascade
+        Gère les échecs de création d'ordres cascade - Arrête juste les cascades sans reset complet
         
         Args:
             side: Côté de l'ordre (BUY/SELL)
@@ -540,17 +441,18 @@ class CascadeService:
             stop_price: Prix de stop utilisé
         """
         self.logger.debug(f"_handle_cascade_order_failure called: {side} {quantity} @ {stop_price}")
-        
-        # Pour l'instant, arrêter la cascade en cas d'échec
-        # Dans le futur, on pourrait implémenter des retry selon le type d'erreur
-        self.logger.warning(f"Arrêt de la cascade suite à l'échec de création d'ordre {side}")
-        self.state = CascadeState.STOPPED
+        self.logger.warning(f"⚠️ Échec création ordre cascade {side} - Arrêt des cascades uniquement")
         
         # Ajouter des métriques pour debugging
         self.logger.info(f"État au moment de l'échec:")
         self.logger.info(f"  Ordres créés: {self.cascade_orders_count}/{config.CASCADE_CONFIG['MAX_ORDERS']}")
         self.logger.info(f"  Positions: LONG={self.current_long_quantity} SHORT={self.current_short_quantity}")
         self.logger.info(f"  Prix références: LONG={self.initial_long_price} SHORT={self.initial_short_price}")
+        
+        # Simplement arrêter la cascade - LES POSITIONS ET TP RESTENT ACTIFS
+        self.state = CascadeState.STOPPED
+        
+        self.logger.info("🔄 Cascade arrêtée - Positions et TP restent actifs pour atteindre les TP")
     
     def _cache_symbol_precision(self) -> None:
         """
@@ -700,3 +602,423 @@ class CascadeService:
             return f"CASCADE: 🛑 {reason} ({status['orders_count']}/{status['max_orders']})"
         
         return "CASCADE: ❓ État inconnu"
+    
+    def _is_hedge_order(self, order_id: str) -> bool:
+        """
+        Vérifie si un ordre ID correspond au hedge initial
+        
+        Args:
+            order_id: ID de l'ordre à vérifier
+            
+        Returns:
+            True si c'est le hedge, False sinon
+        """
+        if not self.initial_hedge_order:
+            self.logger.debug(f"❌ _is_hedge_order: pas de hedge initial défini (order_id={order_id})")
+            return False
+        
+        hedge_id = str(self.initial_hedge_order.get("orderId", ""))
+        is_hedge = hedge_id == order_id
+        
+        self.logger.info(f"🔍 _is_hedge_order: hedge_id={hedge_id}, order_id={order_id}, is_hedge={is_hedge}, state={self.state}")
+        
+        return is_hedge
+    
+    def _is_cascade_order(self, order_id: str) -> bool:
+        """
+        Vérifie si un ordre ID correspond à un ordre cascade
+        
+        Args:
+            order_id: ID de l'ordre à vérifier
+            
+        Returns:
+            True si c'est un ordre cascade, False sinon
+        """
+        for order in self.pending_orders:
+            if str(order.get("orderId", "")) == order_id:
+                return True
+        return False
+    
+    def _process_hedge_execution_sync(self, side: str, quantity: float, price: float) -> None:
+        """
+        Traite l'exécution du hedge initial via WebSocket (version synchrone)
+        
+        Args:
+            side: Côté de l'ordre (BUY/SELL)
+            quantity: Quantité exécutée
+            price: Prix d'exécution
+        """
+        try:
+            self.logger.info(f"🎯 Traitement exécution hedge WebSocket: {side} {quantity} @ {price}")
+            
+            # Mettre à jour les prix et quantités
+            if side == "BUY":
+                self.initial_long_price = price
+                self.current_long_quantity += quantity
+            else:
+                self.initial_short_price = price
+                self.current_short_quantity += quantity
+            
+            # Créer/mettre à jour les TP pour hedge
+            if self.tp_service and config.TP_CONFIG["ENABLED"]:
+                self._create_tp_for_hedge_execution(side, quantity)
+            
+            # Passer en mode cascade active
+            self.state = CascadeState.ACTIVE
+            self.initial_hedge_order = None
+            
+            # Créer le premier ordre cascade (sera créé lors de la prochaine opportunité async)
+            self.logger.info("🔄 Cascade prête - Premier ordre cascade sera créé")
+            
+            self.logger.info(f"✅ Hedge traité via WebSocket - Cascade active")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur traitement hedge WebSocket: {e}", exc_info=True)
+    
+    async def _process_hedge_execution_async(self, side: str, quantity: float, price: float) -> None:
+        """
+        Traite l'exécution du hedge initial via WebSocket (version async)
+        
+        Args:
+            side: Côté de l'ordre (BUY/SELL)
+            quantity: Quantité exécutée
+            price: Prix d'exécution
+        """
+        try:
+            self.logger.info(f"🎯 Traitement exécution hedge WebSocket ASYNC: {side} {quantity} @ {price}")
+            
+            # Récupérer d'abord le prix de l'ordre initial si pas encore défini
+            await self._retrieve_initial_order_price_async()
+            
+            # Mettre à jour les prix et quantités du hedge
+            if side == "BUY":
+                # Hedge BUY exécuté → définir le prix LONG de référence 
+                if self.initial_long_price is None:
+                    self.initial_long_price = price
+                    self.logger.info(f"Prix LONG hedge défini: {price}")
+                self.current_long_quantity += quantity
+            else:
+                # Hedge SELL exécuté → définir le prix SHORT de référence
+                if self.initial_short_price is None:
+                    self.initial_short_price = price
+                    self.logger.info(f"Prix SHORT hedge défini: {price}")
+                self.current_short_quantity += quantity
+            
+            # Créer/mettre à jour les TP pour hedge
+            if self.tp_service and config.TP_CONFIG["ENABLED"]:
+                self._create_tp_for_hedge_execution(side, quantity)
+            
+            # Passer en mode cascade active
+            self.state = CascadeState.ACTIVE
+            self.initial_hedge_order = None
+            
+            # Vérifier que les prix sont bien initialisés avant de créer l'ordre cascade
+            self.logger.info(f"📊 Prix avant création cascade: LONG={self.initial_long_price}, SHORT={self.initial_short_price}")
+            
+            if self.initial_long_price is None or self.initial_short_price is None:
+                self.logger.error("❌ Prix de référence manquants - impossible de créer l'ordre cascade")
+                self.logger.error(f"   LONG: {self.initial_long_price}, SHORT: {self.initial_short_price}")
+                return
+            
+            # Créer le premier ordre cascade immédiatement (version async)
+            self.logger.info("🔄 Création du premier ordre cascade...")
+            await self._create_next_cascade_order()
+            
+            self.logger.info(f"✅ Hedge traité via WebSocket ASYNC - Cascade active avec premier ordre créé")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur traitement hedge WebSocket ASYNC: {e}", exc_info=True)
+            
+    def _process_cascade_execution_sync(self, side: str, quantity: float, price: float, order_id: str) -> None:
+        """
+        Traite l'exécution d'un ordre cascade via WebSocket (version synchrone)
+        
+        Args:
+            side: Côté de l'ordre (BUY/SELL) 
+            quantity: Quantité exécutée
+            price: Prix d'exécution
+            order_id: ID de l'ordre exécuté
+        """
+        try:
+            self.logger.info(f"🔄 Traitement exécution cascade WebSocket: {side} {quantity} @ {price}")
+            
+            # Retirer l'ordre de la liste pending
+            self.pending_orders = [order for order in self.pending_orders if str(order.get("orderId", "")) != order_id]
+            
+            # Mettre à jour les quantités
+            if side == "BUY":
+                self.current_long_quantity += quantity
+            else:
+                self.current_short_quantity += quantity
+            
+            self.cascade_orders_count += 1
+            
+            # Mettre à jour les TP
+            if self.tp_service and config.TP_CONFIG["ENABLED"]:
+                self._update_tp_after_cascade(side)
+            
+            # Créer l'ordre cascade suivant si sous la limite
+            if self.cascade_orders_count < config.CASCADE_CONFIG["MAX_ORDERS"]:
+                self.logger.info("🔄 Prochain ordre cascade sera créé lors de la prochaine bougie")
+            else:
+                self.logger.info("Limite d'ordres cascade atteinte")
+                self.state = CascadeState.STOPPED
+            
+            self.logger.info(f"✅ Cascade {side} traitée via WebSocket - Total ordres: {self.cascade_orders_count}")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur traitement cascade WebSocket: {e}", exc_info=True)
+            
+    async def _process_cascade_execution_async(self, side: str, quantity: float, price: float, order_id: str) -> None:
+        """
+        Traite l'exécution d'un ordre cascade via WebSocket (version async)
+        
+        Args:
+            side: Côté de l'ordre (BUY/SELL) 
+            quantity: Quantité exécutée
+            price: Prix d'exécution
+            order_id: ID de l'ordre exécuté
+        """
+        try:
+            self.logger.info(f"🔄 Traitement exécution cascade WebSocket ASYNC: {side} {quantity} @ {price}")
+            
+            # Retirer l'ordre de la liste pending
+            self.pending_orders = [order for order in self.pending_orders if str(order.get("orderId", "")) != order_id]
+            
+            # Mettre à jour les quantités
+            if side == "BUY":
+                self.current_long_quantity += quantity
+            else:
+                self.current_short_quantity += quantity
+            
+            self.cascade_orders_count += 1
+            
+            # Mettre à jour les TP
+            if self.tp_service and config.TP_CONFIG["ENABLED"]:
+                self._update_tp_after_cascade(side)
+            
+            # Créer l'ordre cascade suivant si sous la limite
+            if self.cascade_orders_count < config.CASCADE_CONFIG["MAX_ORDERS"]:
+                self.logger.info("🔄 Création ordre cascade suivant...")
+                await self._create_next_cascade_order()
+            else:
+                self.logger.info("Limite d'ordres cascade atteinte")
+                self.state = CascadeState.STOPPED
+            
+            self.logger.info(f"✅ Cascade {side} traitée via WebSocket ASYNC - Total ordres: {self.cascade_orders_count}")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur traitement cascade WebSocket ASYNC: {e}", exc_info=True)
+
+    async def _process_hedge_execution_websocket(self, side: str, quantity: float, price: float) -> None:
+        """
+        Traite l'exécution du hedge initial via WebSocket
+        
+        Args:
+            side: Côté de l'ordre (BUY/SELL)
+            quantity: Quantité exécutée
+            price: Prix d'exécution
+        """
+        try:
+            self.logger.info(f"🎯 Traitement exécution hedge WebSocket: {side} {quantity} @ {price}")
+            
+            # Mettre à jour les prix et quantités
+            if side == "BUY":
+                self.initial_long_price = price
+                self.current_long_quantity += quantity
+            else:
+                self.initial_short_price = price
+                self.current_short_quantity += quantity
+            
+            # Créer/mettre à jour les TP pour hedge
+            if self.tp_service and config.TP_CONFIG["ENABLED"]:
+                self._create_tp_for_hedge_execution(side, quantity)
+            
+            # Passer en mode cascade active
+            self.state = CascadeState.ACTIVE
+            self.initial_hedge_order = None
+            
+            # Créer le premier ordre cascade
+            await self._create_next_cascade_order()
+            
+            self.logger.info(f"✅ Hedge traité via WebSocket - Cascade active")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur traitement hedge WebSocket: {e}", exc_info=True)
+    
+    async def _process_cascade_execution_websocket(self, side: str, quantity: float, price: float, order_id: str) -> None:
+        """
+        Traite l'exécution d'un ordre cascade via WebSocket
+        
+        Args:
+            side: Côté de l'ordre (BUY/SELL) 
+            quantity: Quantité exécutée
+            price: Prix d'exécution
+            order_id: ID de l'ordre exécuté
+        """
+        try:
+            self.logger.info(f"🔄 Traitement exécution cascade WebSocket: {side} {quantity} @ {price}")
+            
+            # Retirer l'ordre de la liste pending
+            self.pending_orders = [order for order in self.pending_orders if str(order.get("orderId", "")) != order_id]
+            
+            # Mettre à jour les quantités
+            if side == "BUY":
+                self.current_long_quantity += quantity
+            else:
+                self.current_short_quantity += quantity
+            
+            self.orders_executed_count += 1
+            
+            # Mettre à jour les TP
+            if self.tp_service and config.TP_CONFIG["ENABLED"]:
+                self._update_tp_after_cascade(side)
+            
+            # Créer l'ordre cascade suivant si sous la limite
+            if self.orders_executed_count < config.CASCADE_CONFIG["MAX_ORDERS"]:
+                await self._create_next_cascade_order()
+            else:
+                self.logger.info("Limite d'ordres cascade atteinte")
+                self.state = CascadeState.STOPPED
+            
+            self.logger.info(f"✅ Cascade {side} traitée via WebSocket - Total ordres: {self.orders_executed_count}")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur traitement cascade WebSocket: {e}", exc_info=True)
+    
+    def handle_tp_execution(self, executed_side: str) -> None:
+        """
+        Gère l'exécution d'un TP avec reset complet du système pour nouveau cycle
+        
+        Args:
+            executed_side: Côté du TP exécuté ("LONG" ou "SHORT")
+        """
+        self.logger.debug(f"handle_tp_execution called: {executed_side}")
+        self.logger.info(f"🎯 TP {executed_side} exécuté - Démarrage du reset complet du système")
+        
+        try:
+            # 1. Fermer TOUTES les positions ouvertes (pas seulement le côté du TP exécuté)
+            self._close_all_positions()
+            
+            # 2. Annuler TOUS les ordres en attente (LONG et SHORT)
+            self._cancel_all_pending_orders()
+            
+            # 3. Annuler l'ordre hedge initial s'il existe encore
+            if self.initial_hedge_order:
+                hedge_order_id = self.initial_hedge_order.get("orderId")
+                if hedge_order_id:
+                    cancel_result = self.binance_client.cancel_order(config.SYMBOL, int(hedge_order_id))
+                    if cancel_result:
+                        self.logger.info(f"Ordre hedge initial {hedge_order_id} annulé")
+                    self.initial_hedge_order = None
+            
+            # 4. Reset complet des variables du système cascade
+            self.current_long_quantity = 0.0
+            self.current_short_quantity = 0.0
+            self.initial_long_price = None
+            self.initial_short_price = None
+            self.pending_orders.clear()
+            self.cascade_orders_count = 0
+            
+            # 5. Passer en état STOPPED pour permettre nouveau signal
+            self.state = CascadeState.STOPPED
+            
+            self.logger.info("✅ Reset complet terminé - Système prêt pour nouveau signal")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors du reset complet système: {e}", exc_info=True)
+    
+    def _close_all_positions(self) -> None:
+        """
+        Ferme toutes les positions ouvertes (LONG et SHORT) après vérification des positions réelles
+        """
+        self.logger.info("Vérification et fermeture des positions réelles ouvertes")
+        
+        try:
+            # Récupérer les positions réelles depuis Binance
+            positions = self.binance_client.get_position_info(config.SYMBOL)
+            if not positions:
+                self.logger.warning("Impossible de récupérer les positions - abandon fermeture")
+                return
+            
+            # Parcourir les positions et fermer celles qui ont une quantité > 0
+            for position in positions:
+                position_side = position.get("positionSide", "")
+                position_amt = float(position.get("positionAmt", "0"))
+                
+                # Ignorer les positions avec quantité nulle
+                if abs(position_amt) == 0:
+                    continue
+                
+                self.logger.info(f"Position {position_side} détectée: {position_amt}")
+                
+                # Déterminer l'ordre de fermeture
+                if position_side == "LONG" and position_amt > 0:
+                    side = "SELL"
+                    quantity = position_amt
+                elif position_side == "SHORT" and position_amt < 0:
+                    side = "BUY"
+                    quantity = abs(position_amt)  # Convertir en positif
+                else:
+                    continue
+                
+                # Formatter et placer l'ordre de fermeture
+                formatted_quantity = self._format_cascade_quantity(quantity)
+                if formatted_quantity:
+                    order = self.binance_client.place_order(
+                        symbol=config.SYMBOL,
+                        side=side,
+                        quantity=formatted_quantity,
+                        order_type="MARKET",
+                        position_side=position_side
+                    )
+                    if order:
+                        self.logger.info(f"✅ Position {position_side} fermée: {formatted_quantity}")
+                    else:
+                        self.logger.error(f"❌ Échec fermeture position {position_side}")
+                else:
+                    self.logger.error(f"Erreur formatage quantité {position_side}: {quantity}")
+                    
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la fermeture des positions: {e}", exc_info=True)
+    
+    def _cancel_all_pending_orders(self) -> None:
+        """
+        Annule tous les ordres en attente (LONG et SHORT)
+        """
+        self.logger.info(f"Annulation de tous les ordres en attente ({len(self.pending_orders)})")
+        
+        try:
+            orders_to_cancel = self.pending_orders.copy()  # Copie pour éviter modification pendant itération
+            
+            for order in orders_to_cancel:
+                order_id = order.get("orderId")
+                if order_id:
+                    cancel_result = self.binance_client.cancel_order(config.SYMBOL, int(order_id))
+                    if cancel_result:
+                        self.pending_orders.remove(order)
+                        self.logger.info(f"Ordre cascade {order_id} annulé")
+                    else:
+                        self.logger.warning(f"Échec annulation ordre {order_id}")
+                        
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'annulation des ordres: {e}", exc_info=True)
+    
+    def _cancel_pending_order(self, order: Dict[str, Any]) -> None:
+        """
+        Annule un ordre en attente
+        
+        Args:
+            order: Ordre à annuler
+        """
+        try:
+            order_id = order.get("orderId")
+            if order_id:
+                cancel_result = self.binance_client.cancel_order(config.SYMBOL, int(order_id))
+                if cancel_result:
+                    self.pending_orders.remove(order)
+                    self.logger.info(f"Ordre cascade {order_id} annulé suite à l'exécution TP")
+                else:
+                    self.logger.warning(f"Échec annulation ordre cascade {order_id}")
+        except Exception as e:
+            self.logger.error(f"Erreur annulation ordre cascade: {e}", exc_info=True)

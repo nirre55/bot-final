@@ -88,7 +88,13 @@ class WebSocketManager:
         print(f"[ATTENTE] Reconnexion dans {config.RECONNECTION_CONFIG['DELAY_SECONDS']} secondes...")
         
         try:
-            await asyncio.sleep(config.RECONNECTION_CONFIG["DELAY_SECONDS"])
+            # Vérifier si l'arrêt a été demandé pendant l'attente
+            for _ in range(config.RECONNECTION_CONFIG["DELAY_SECONDS"]):
+                if not self.is_running:
+                    self.logger.info("Arrêt demandé pendant l'attente de reconnexion")
+                    print("\n[ARRET] Reconnexion annulée par l'utilisateur")
+                    return False
+                await asyncio.sleep(1)
             return True
         except asyncio.CancelledError:
             self.logger.info("Reconnexion annulée par l'utilisateur")
@@ -224,6 +230,11 @@ class WebSocketManager:
         if self.websocket:
             try:
                 self.logger.info("Fermeture explicite de la connexion WebSocket")
-                asyncio.create_task(self.websocket.close())
+                # Utiliser get_event_loop au lieu de create_task pour éviter les erreurs
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(self.websocket.close())
+                else:
+                    loop.run_until_complete(self.websocket.close())
             except Exception as e:
                 self.logger.warning(f"Erreur lors de la fermeture WebSocket: {e}")

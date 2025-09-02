@@ -307,6 +307,99 @@ class TPService:
             "current_short_quantity": self.current_short_quantity
         }
     
+    def check_tp_execution_and_cleanup(self) -> Optional[str]:
+        """
+        Vérifie si un TP a été exécuté et annule l'autre TP si nécessaire
+        
+        Returns:
+            Côté du TP exécuté ("LONG" ou "SHORT") ou None
+        """
+        self.logger.debug("check_tp_execution_and_cleanup called")
+        
+        if not config.TP_CONFIG["ENABLED"]:
+            return None
+        
+        try:
+            executed_side = None
+            
+            # Vérifier TP LONG
+            if self.active_tp_long:
+                long_order_id = self.active_tp_long.get("orderId")
+                if long_order_id:
+                    order_status = self.binance_client.get_order_status(config.SYMBOL, int(long_order_id))
+                    if order_status and order_status.get("status") == "FILLED":
+                        self.logger.info(f"TP LONG exécuté - ID: {long_order_id}")
+                        executed_side = "LONG"
+                        self.active_tp_long = None
+                        self.current_long_quantity = 0.0
+                        
+                        # Annuler le TP SHORT s'il existe
+                        if self.active_tp_short:
+                            self._cancel_tp_order(self.active_tp_short)
+                            self.active_tp_short = None
+                            self.logger.info("TP SHORT annulé suite à l'exécution du TP LONG")
+            
+            # Vérifier TP SHORT
+            if self.active_tp_short and executed_side is None:
+                short_order_id = self.active_tp_short.get("orderId")
+                if short_order_id:
+                    order_status = self.binance_client.get_order_status(config.SYMBOL, int(short_order_id))
+                    if order_status and order_status.get("status") == "FILLED":
+                        self.logger.info(f"TP SHORT exécuté - ID: {short_order_id}")
+                        executed_side = "SHORT"
+                        self.active_tp_short = None
+                        self.current_short_quantity = 0.0
+                        
+                        # Annuler le TP LONG s'il existe
+                        if self.active_tp_long:
+                            self._cancel_tp_order(self.active_tp_long)
+                            self.active_tp_long = None
+                            self.logger.info("TP LONG annulé suite à l'exécution du TP SHORT")
+            
+            if executed_side:
+                self.logger.info(f"✅ TP {executed_side} exécuté avec succès - Nettoyage automatique effectué")
+                # Reset complet du système TP pour permettre nouveau cycle
+                self._reset_tp_system()
+                
+            return executed_side
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la vérification TP: {e}", exc_info=True)
+            return None
+    
+    def _reset_tp_system(self) -> None:
+        """
+        Reset complet du système TP pour nouveau cycle
+        """
+        self.logger.info("🔄 Reset complet du système TP")
+        
+        try:
+            # Reset des prix de référence
+            self.initial_price = None
+            self.hedge_stop_price = None
+            self.tp_distance = None
+            
+            # Reset des niveaux TP de base
+            self.tp_long_base = None
+            self.tp_short_base = None
+            
+            # Reset des compteurs d'incréments
+            self.long_increment_count = 0
+            self.short_increment_count = 0
+            
+            # Reset des ordres TP actifs (déjà fait dans check_tp_execution_and_cleanup)
+            self.active_tp_long = None
+            self.active_tp_short = None
+            
+            # Reset des quantités actuelles
+            self.current_long_quantity = 0.0
+            self.current_short_quantity = 0.0
+            
+            self.logger.info("✅ Système TP réinitialisé - Prêt pour nouveau signal")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors du reset TP: {e}", exc_info=True)
+    
     def format_tp_display(self) -> str:
         """
         Formate l'affichage de l'état TP

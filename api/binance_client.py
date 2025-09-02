@@ -466,3 +466,137 @@ class BinanceAPIClient:
         except Exception as e:
             self.logger.error(f"Erreur lors de l'annulation d'ordre: {e}", exc_info=True)
             return None
+    
+    def get_position_info(self, symbol: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Récupère les informations de position pour un symbole
+        
+        Args:
+            symbol: Symbole à récupérer
+            
+        Returns:
+            Liste des positions ou None
+        """
+        self.logger.debug(f"get_position_info called for {symbol}")
+        self.logger.info(f"Récupération des positions pour {symbol}")
+        
+        try:
+            endpoint = "/fapi/v2/positionRisk"
+            timestamp = int(time.time() * 1000)
+            
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "timestamp": timestamp
+            }
+            
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+            
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            response = requests.get(
+                f"{self.base_url}{endpoint}",
+                params=params,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                positions = response.json()
+                self.logger.info(f"Positions récupérées avec succès pour {symbol}")
+                return positions
+            else:
+                self.logger.error(f"Erreur récupération positions: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la récupération des positions: {e}", exc_info=True)
+            return None
+    
+    def create_listen_key(self) -> Optional[Dict[str, Any]]:
+        """
+        Crée un listen key pour le User Data Stream
+        
+        Returns:
+            Réponse avec listen key ou None
+        """
+        self.logger.debug("create_listen_key called")
+        self.logger.info("Création d'un listen key pour User Data Stream")
+        
+        try:
+            endpoint = "/fapi/v1/listenKey"
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            response = requests.post(f"{self.base_url}{endpoint}", headers=headers)
+            
+            if response.status_code == 200:
+                listen_key_data = response.json()
+                self.logger.info("Listen key créé avec succès")
+                return listen_key_data
+            else:
+                self.logger.error(f"Erreur création listen key: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la création du listen key: {e}", exc_info=True)
+            return None
+    
+    def keep_alive_listen_key(self, listen_key: str) -> bool:
+        """
+        Maintient un listen key actif
+        
+        Args:
+            listen_key: Listen key à maintenir actif
+            
+        Returns:
+            True si succès, False sinon
+        """
+        self.logger.debug(f"keep_alive_listen_key called: {listen_key[:10]}...")
+        
+        try:
+            endpoint = "/fapi/v1/listenKey"
+            headers = {"X-MBX-APIKEY": self.api_key}
+            params = {"listenKey": listen_key}
+            
+            response = requests.put(f"{self.base_url}{endpoint}", headers=headers, params=params)
+            
+            if response.status_code == 200:
+                self.logger.debug("Listen key keep-alive réussi")
+                return True
+            else:
+                self.logger.error(f"Erreur keep-alive listen key: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors du keep-alive listen key: {e}", exc_info=True)
+            return False
+    
+    def close_listen_key(self, listen_key: str) -> bool:
+        """
+        Ferme un listen key
+        
+        Args:
+            listen_key: Listen key à fermer
+            
+        Returns:
+            True si succès, False sinon
+        """
+        self.logger.debug(f"close_listen_key called: {listen_key[:10]}...")
+        
+        try:
+            endpoint = "/fapi/v1/listenKey"
+            headers = {"X-MBX-APIKEY": self.api_key}
+            params = {"listenKey": listen_key}
+            
+            response = requests.delete(f"{self.base_url}{endpoint}", headers=headers, params=params)
+            
+            if response.status_code == 200:
+                self.logger.info("Listen key fermé avec succès")
+                return True
+            else:
+                self.logger.error(f"Erreur fermeture listen key: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la fermeture du listen key: {e}", exc_info=True)
+            return False

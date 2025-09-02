@@ -15,7 +15,7 @@ The bot follows a **layered architecture** where each component has a single res
 - **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService, TradingService, CascadeService)  
 - **Indicator Layer** (`indicators/`): Pure calculation logic (RSI, Heikin Ashi)
 - **API Layer** (`api/`): External service communication (Binance REST API, market data)
-- **WebSocket Layer** (`websocket/`): Real-time data streaming with auto-reconnection
+- **WebSocket Layer** (`websocket/`): Dual WebSocket streams (klines + User Data Stream) with auto-reconnection
 
 ### Key Integration Pattern
 The bot triggers calculations **only on candle close events** detected through WebSocket kline streams:
@@ -26,6 +26,7 @@ The bot triggers calculations **only on candle close events** detected through W
 5. Process signal detection → `_process_signal_detection()`
 6. Execute trade with automatic hedging → `_execute_trade()`
 7. Start cascade trading system → `CascadeService.start_cascade()`
+8. Real-time order execution detection via User Data Stream → `UserDataStreamManager`
 
 ## Common Commands
 
@@ -64,9 +65,20 @@ The bot calculates **multiple RSI periods** with different sensitivity threshold
 - **Hedging analysis**: Configurable lookback candles for high/low detection
 
 ### WebSocket Connection Management
+The bot uses **dual WebSocket streams** for maximum responsiveness:
+
+**Kline Stream** (`websocket_manager.py`):
+- **Purpose**: Real-time price data and candle close detection
 - **Auto-reconnection**: Up to 100 attempts with 30-second delays
 - **Connection health**: 3600-second timeout monitoring
-- **Target endpoint**: Binance USDⓈ-M Futures WebSocket (`wss://fstream.binance.com/ws/`)
+- **Target**: `wss://fstream.binance.com/ws/{symbol}@kline_{timeframe}`
+
+**User Data Stream** (`user_data_manager.py`):
+- **Purpose**: Real-time order execution detection for cascade system
+- **Listen Key**: Automatic creation, refresh (30min), and cleanup
+- **Events**: `ORDER_TRADE_UPDATE`, `ACCOUNT_UPDATE`
+- **Target**: `wss://fstream.binance.com/ws/{listenKey}`
+- **Instant Detection**: Hedge and cascade order executions in real-time
 
 ## Logging System
 
@@ -118,13 +130,14 @@ The bot includes **automatic hedge order creation** after each signal execution:
 - `QUANTITY_MULTIPLIER`: Size multiplier for hedge orders
 
 ### Cascade Trading System
-The bot features an **advanced cascade trading system** that automatically creates alternating orders after hedging:
+The bot features an **advanced real-time cascade trading system** with instant WebSocket order execution detection:
 
-**Cascade Logic**:
+**Cascade Logic** (100% WebSocket-driven):
 - **Step 1**: Signal triggers initial order + hedge (as above)
-- **Step 2**: When hedge executes → Create opposite order with doubled quantity minus existing position
-- **Step 3**: Continue alternating LONG/SHORT orders using execution prices as permanent stop levels
+- **Step 2**: User Data Stream detects hedge execution → **Instantly** create opposite cascade order
+- **Step 3**: Each cascade execution → **Instantly** create next alternating order
 - **Formula**: `Next quantity = (2 × Triggered quantity) - Existing quantity same side`
+- **Speed**: Sub-second reaction time vs previous 30-second polling
 
 **Example Sequence**:
 ```
@@ -138,20 +151,66 @@ SHORT executes → LONG 0.012 @ 111200 (stop)
 **Cascade Configuration** (`CASCADE_CONFIG`):
 - `ENABLED`: Enable/disable cascade trading system
 - `MAX_ORDERS`: Maximum number of cascade orders (default: 10)
-- `POLLING_INTERVAL_SECONDS`: Order status checking frequency (default: 30s)
 - `RETRY_ATTEMPTS`: Retry count for failed orders (excluding insufficient funds)
+
+**WebSocket Implementation**:
+- **Event Detection**: `ORDER_TRADE_UPDATE` with `o.X = "FILLED"` status
+- **Real-time Processing**: `_process_hedge_execution_async()` and `_process_cascade_execution_async()`
+- **Price Recovery**: Automatic retrieval of initial order prices via API
+- **State Management**: Instant CASCADE state updates (WAITING_HEDGE → ACTIVE → STOPPED)
 
 **Key Features**:
 - **Permanent Stop Levels**: Uses execution prices of first two orders as reference points
 - **Signal Blocking**: Prevents new signals while cascade is active
-- **Real-time Monitoring**: Displays cascade status with position tracking
+- **Real-time Monitoring**: Instant cascade status display with position tracking
 - **Automatic Termination**: Stops at MAX_ORDERS limit or on critical errors
+- **Zero Latency**: WebSocket-driven execution detection (vs. polling-based systems)
 
 ### Position Management
 - **Hedge Mode**: Uses Binance hedge mode with position sides (LONG/SHORT)
 - **Order Types**: MARKET orders for signals, STOP_MARKET orders for hedges and cascade
 - **Price Recovery**: Retrieves execution prices via API for accuracy
 - **Quantity Management**: Automatic calculation with proper formatting and step size compliance
+
+## WebSocket Architecture Details
+
+### Dual Stream Design
+The bot implements a **sophisticated dual WebSocket architecture** for maximum performance:
+
+**Stream 1: Market Data** (`WebSocketManager`)
+- **Purpose**: Kline data for technical analysis
+- **Triggers**: RSI/HA calculations on candle close
+- **Reconnection**: Robust with exponential backoff
+- **Error Handling**: Comprehensive logging and recovery
+
+**Stream 2: User Data** (`UserDataStreamManager`)  
+- **Purpose**: Order execution events for trading automation
+- **Events**: `ORDER_TRADE_UPDATE`, `ACCOUNT_UPDATE`
+- **Authentication**: Listen Key lifecycle management
+- **Processing**: Instant cascade triggers via `ORDER_TRADE_UPDATE`
+
+### Event Processing Flow
+```
+ORDER_TRADE_UPDATE → Filter FILLED status → Identify order type → Route to handler
+├── Hedge Order → _process_hedge_execution_async() → Create first cascade order
+└── Cascade Order → _process_cascade_execution_async() → Create next cascade order
+```
+
+### Listen Key Management
+- **Creation**: Automatic via `create_listen_key()` API call
+- **Refresh**: Every 30 minutes via keep-alive mechanism  
+- **Cleanup**: Proper closure on bot shutdown
+- **Error Recovery**: Automatic recreation on connection failures
+
+### Message Structure (Binance Futures)
+Key fields from `ORDER_TRADE_UPDATE` events:
+- `o.i`: Order ID for identification
+- `o.X`: Order Status (`NEW`, `FILLED`, `CANCELED`, etc.)
+- `o.x`: Execution Type (`NEW`, `TRADE`, `CANCELED`, etc.)
+- `o.S`: Side (`BUY`/`SELL`)
+- `o.z`: Cumulative filled quantity
+- `o.L`: Last executed price
+- `o.ps`: Position side (`LONG`/`SHORT`/`BOTH`)
 
 ## Architecture Principles
 
