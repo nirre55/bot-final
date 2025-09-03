@@ -18,6 +18,7 @@ class CascadeState(Enum):
     INACTIVE = "inactive"  # Pas de cascade active
     WAITING_HEDGE = "waiting_hedge"  # Attente exécution hedge initial
     ACTIVE = "active"  # Cascade active avec ordres en attente
+    WAITING_TP = "waiting_tp"  # Cascade arrêtée (fonds insuffisants), attente TP
     STOPPED = "stopped"  # Cascade arrêtée (limite atteinte ou erreur)
 
 
@@ -255,6 +256,62 @@ class CascadeService:
 
         except Exception as e:
             self.logger.error(f"Erreur lors de la récupération du prix initial: {e}", exc_info=True)
+    
+    async def _create_next_cascade_order_with_retry(self, retry_count: int = 0) -> None:
+        """
+        Crée le prochain ordre cascade avec retry automatique sur échecs
+        
+        Args:
+            retry_count: Nombre de tentatives déjà effectuées
+        """
+        max_attempts = config.RECONNECTION_CONFIG["MAX_ATTEMPTS"]
+        delay_seconds = config.RECONNECTION_CONFIG["DELAY_SECONDS"]
+        
+        try:
+            # Appeler la méthode originale de création d'ordre
+            await self._create_next_cascade_order()
+            self.logger.info("✅ Ordre cascade créé avec succès")
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            # Cas 1: Fonds insuffisants → Arrêter cascade et attendre TP
+            if "margin is insufficient" in error_msg or "insufficient" in error_msg:
+                self.logger.warning("💰 Fonds insuffisants détectés - Arrêt cascade et attente TP")
+                self.logger.warning(f"   Erreur Binance: {str(e)}")
+                self.logger.info(f"   Positions actuelles: LONG={self.current_long_quantity:.3f}, SHORT={self.current_short_quantity:.3f}")
+                self.logger.info("🔄 État cascade → WAITING_TP (TP restent actifs)")
+                
+                # Passer en mode attente TP
+                self.state = CascadeState.WAITING_TP
+                
+                # Nettoyer les ordres pending mais garder les TP actifs
+                self.pending_orders.clear()
+                
+                self.logger.info("⏳ Cascade en attente - Le système reprendra au prochain signal après TP")
+                return
+            
+            # Cas 2: Autres erreurs → Retry automatique
+            else:
+                if retry_count < max_attempts:
+                    retry_count += 1
+                    self.logger.warning(f"⚠️ Échec création cascade (tentative {retry_count}/{max_attempts}): {e}")
+                    self.logger.warning(f"   Type d'erreur: {type(e).__name__}")
+                    self.logger.warning(f"   Message complet: {str(e)}")
+                    self.logger.info(f"🔄 Retry dans {delay_seconds}s...")
+                    
+                    # Attendre avant retry
+                    await asyncio.sleep(delay_seconds)
+                    
+                    # Retry récursif
+                    await self._create_next_cascade_order_with_retry(retry_count)
+                else:
+                    # Max attempts atteint → Arrêter cascade
+                    self.logger.error(f"❌ Échec création cascade après {max_attempts} tentatives - Arrêt")
+                    self.logger.error(f"Dernière erreur: {e}", exc_info=True)
+                    
+                    self.state = CascadeState.STOPPED
+                    self.stop_cascade("Échecs répétés création ordres")
     
     def _update_tp_after_cascade(self, executed_side: str) -> None:
         """
@@ -597,6 +654,8 @@ class CascadeService:
                    f"| LONG:{status['current_long_quantity']:.3f} "
                    f"SHORT:{status['current_short_quantity']:.3f} "
                    f"| {pending_info}")
+        elif self.state == CascadeState.WAITING_TP:
+            return f"CASCADE: 💰 Fonds insuffisants - Attente TP ({status['orders_count']}/{status['max_orders']})"
         elif self.state == CascadeState.STOPPED:
             reason = "Limite atteinte" if status['orders_count'] >= status['max_orders'] else "Arrêté"
             return f"CASCADE: 🛑 {reason} ({status['orders_count']}/{status['max_orders']})"
@@ -722,9 +781,9 @@ class CascadeService:
                 self.logger.error(f"   LONG: {self.initial_long_price}, SHORT: {self.initial_short_price}")
                 return
             
-            # Créer le premier ordre cascade immédiatement (version async)
+            # Créer le premier ordre cascade immédiatement (version async avec retry)
             self.logger.info("🔄 Création du premier ordre cascade...")
-            await self._create_next_cascade_order()
+            await self._create_next_cascade_order_with_retry()
             
             self.logger.info(f"✅ Hedge traité via WebSocket ASYNC - Cascade active avec premier ordre créé")
             
@@ -802,7 +861,7 @@ class CascadeService:
             # Créer l'ordre cascade suivant si sous la limite
             if self.cascade_orders_count < config.CASCADE_CONFIG["MAX_ORDERS"]:
                 self.logger.info("🔄 Création ordre cascade suivant...")
-                await self._create_next_cascade_order()
+                await self._create_next_cascade_order_with_retry()
             else:
                 self.logger.info("Limite d'ordres cascade atteinte")
                 self.state = CascadeState.STOPPED
@@ -840,8 +899,8 @@ class CascadeService:
             self.state = CascadeState.ACTIVE
             self.initial_hedge_order = None
             
-            # Créer le premier ordre cascade
-            await self._create_next_cascade_order()
+            # Créer le premier ordre cascade avec retry
+            await self._create_next_cascade_order_with_retry()
             
             self.logger.info(f"✅ Hedge traité via WebSocket - Cascade active")
             
@@ -877,13 +936,13 @@ class CascadeService:
                 self._update_tp_after_cascade(side)
             
             # Créer l'ordre cascade suivant si sous la limite
-            if self.orders_executed_count < config.CASCADE_CONFIG["MAX_ORDERS"]:
-                await self._create_next_cascade_order()
+            if self.cascade_orders_count < config.CASCADE_CONFIG["MAX_ORDERS"]:
+                await self._create_next_cascade_order_with_retry()
             else:
                 self.logger.info("Limite d'ordres cascade atteinte")
                 self.state = CascadeState.STOPPED
             
-            self.logger.info(f"✅ Cascade {side} traitée via WebSocket - Total ordres: {self.orders_executed_count}")
+            self.logger.info(f"✅ Cascade {side} traitée via WebSocket - Total ordres: {self.cascade_orders_count}")
             
         except Exception as e:
             self.logger.error(f"Erreur traitement cascade WebSocket: {e}", exc_info=True)
@@ -896,6 +955,11 @@ class CascadeService:
             executed_side: Côté du TP exécuté ("LONG" ou "SHORT")
         """
         self.logger.debug(f"handle_tp_execution called: {executed_side}")
+        
+        # Cas spécial: Si on était en WAITING_TP, c'est que le système attendait ce TP
+        if self.state == CascadeState.WAITING_TP:
+            self.logger.info(f"💰 TP {executed_side} exécuté - Résolution de l'attente fonds insuffisants")
+        
         self.logger.info(f"🎯 TP {executed_side} exécuté - Démarrage du reset complet du système")
         
         try:

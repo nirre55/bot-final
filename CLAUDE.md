@@ -152,6 +152,27 @@ SHORT executes → LONG 0.012 @ 111200 (stop)
 - `ENABLED`: Enable/disable cascade trading system
 - `MAX_ORDERS`: Maximum number of cascade orders (default: 10)
 - `RETRY_ATTEMPTS`: Retry count for failed orders (excluding insufficient funds)
+- `RETRY_DELAY_SECONDS`: Delay between retry attempts
+
+### Take Profit (TP) System
+The bot includes **automatic Take Profit management** with dynamic price adjustments:
+
+**TP Logic**:
+- **LONG TP**: Always placed **above** current price (+0.1% increment per cascade order)
+- **SHORT TP**: Always placed **below** current price (-0.1% decrement per cascade order)  
+- **Dynamic Updates**: TP prices updated after each hedge and cascade execution
+- **Parallel Management**: Separate TP orders for LONG and SHORT positions
+
+**TP Configuration** (`TP_CONFIG`):
+- `ENABLED`: Enable/disable automatic TP system
+- `MULTIPLIER`: Distance multiplier for initial TP placement (default: 2.0)
+- `INCREMENT_PERCENT`: Price increment per cascade order (default: 0.001 = 0.1%)
+- `PRICE_OFFSET`: Offset between stop price and limit price (default: 0.001)
+
+**TP Updates**:
+- **After hedge execution**: Initial TP creation for both sides
+- **After cascade execution**: All active TPs updated with +/-0.1% increment
+- **Cross-side updates**: LONG cascade execution updates both LONG and SHORT TPs
 
 **WebSocket Implementation**:
 - **Event Detection**: `ORDER_TRADE_UPDATE` with `o.X = "FILLED"` status
@@ -165,6 +186,33 @@ SHORT executes → LONG 0.012 @ 111200 (stop)
 - **Real-time Monitoring**: Instant cascade status display with position tracking
 - **Automatic Termination**: Stops at MAX_ORDERS limit or on critical errors
 - **Zero Latency**: WebSocket-driven execution detection (vs. polling-based systems)
+- **Robust Error Handling**: Advanced retry system with insufficient funds detection
+
+### Cascade Error Robustness
+The cascade system includes **advanced error handling** for production reliability:
+
+**Error Classification**:
+- **Insufficient Funds**: `"Margin is insufficient"` errors → Stop cascade, wait for TP execution
+- **Temporary Errors**: Network, API rate limits → Automatic retry with exponential backoff
+- **Permanent Errors**: Invalid symbols, account issues → Stop cascade after max attempts
+
+**Cascade States**:
+- `INACTIVE`: No cascade running, ready for new signals
+- `WAITING_HEDGE`: Waiting for initial hedge order execution
+- `ACTIVE`: Cascade running, creating alternating orders
+- `WAITING_TP`: Insufficient funds detected, waiting for TP to free capital
+- `STOPPED`: Cascade terminated (max orders, persistent errors, manual stop)
+
+**Retry Logic** (Using `RECONNECTION_CONFIG`):
+- **Max Attempts**: 100 retries for non-insufficient-funds errors
+- **Delay**: 30 seconds between retry attempts
+- **Insufficient Funds**: No retry, immediate transition to `WAITING_TP` state
+- **TP Execution**: Resets system from `WAITING_TP` back to `INACTIVE` for new cycle
+
+**Error Logging**:
+- Detailed error classification with error type and message
+- Position context logging (current LONG/SHORT quantities)
+- Retry attempt tracking with countdown display
 
 ### Position Management
 - **Hedge Mode**: Uses Binance hedge mode with position sides (LONG/SHORT)
