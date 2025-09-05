@@ -46,6 +46,7 @@ python trading_bot.py
 ### Configuration
 - **Trading parameters**: Modify `config.py` (symbol, timeframe, RSI thresholds)
 - **RSI calculation mode**: Set `RSI_ON_HA` in `SIGNAL_CONFIG` (True for HA-based RSI, False for normal RSI)
+- **Quantity calculation**: Configure `TRADING_CONFIG` with three modes (minimum, fixed, percentage-based)
 - **Logging levels**: Adjust `LOGGING_CONFIG` in `config.py`
 - **Reconnection settings**: Configure `RECONNECTION_CONFIG` for WebSocket resilience
 - **Hedging system**: Configure `HEDGING_CONFIG` for automatic hedge orders
@@ -224,7 +225,68 @@ The cascade system includes **advanced error handling** for production reliabili
 - **Hedge Mode**: Uses Binance hedge mode with position sides (LONG/SHORT)
 - **Order Types**: MARKET orders for signals, STOP_MARKET orders for hedges and cascade
 - **Price Recovery**: Retrieves execution prices via API for accuracy
-- **Quantity Management**: Automatic calculation with proper formatting and step size compliance
+- **Quantity Management**: Three quantity modes (minimum, fixed, percentage) with dynamic balance detection and proper formatting
+
+## Initial Quantity Configuration
+
+The bot supports three modes for determining the initial trading quantity:
+
+### Minimum Quantity Mode
+```python
+TRADING_CONFIG: Dict[str, Any] = {
+    "QUANTITY_MODE": "MINIMUM",  # Use symbol's minimum quantity
+    "INITIAL_QUANTITY": 0.002,  # Ignored in this mode
+    "BALANCE_PERCENTAGE": 0.01,  # Ignored in this mode
+}
+```
+- Uses the symbol's minimum trading quantity from Binance
+- Automatically complies with symbol's lot size requirements
+- Conservative approach ensuring all trades are valid
+
+### Fixed Quantity Mode
+```python
+TRADING_CONFIG: Dict[str, Any] = {
+    "QUANTITY_MODE": "FIXED",  # Use custom fixed quantity
+    "INITIAL_QUANTITY": 0.002,  # Your desired starting quantity
+    "BALANCE_PERCENTAGE": 0.01,  # Ignored in this mode
+}
+```
+- Uses a custom fixed quantity as starting amount
+- Still respects symbol's step size for proper formatting
+- Allows for larger initial positions and custom risk management
+
+### Percentage-Based Quantity Mode (Advanced)
+```python
+TRADING_CONFIG: Dict[str, Any] = {
+    "QUANTITY_MODE": "PERCENTAGE",  # Risk percentage of balance
+    "INITIAL_QUANTITY": 0.002,  # Ignored in this mode
+    "BALANCE_PERCENTAGE": 0.01,  # 1% of balance at risk
+}
+```
+- **Advanced risk management**: Calculates quantity based on percentage of available balance
+- **Dynamic balance detection**: Automatically uses the correct quote asset (USDC for BTCUSDC, USDT for ETHUSDT, etc.)
+- **Formula**: `Quantity = (Balance × Percentage) ÷ |Signal_Price - Hedge_Price|`
+- **Risk control**: You risk exactly the specified percentage on the price difference between signal and hedge
+- **Fallback safety**: If balance is insufficient or unavailable, automatically falls back to minimum quantity
+
+### Percentage Mode Technical Details
+
+**Price Difference Calculation**:
+- **Signal LONG**: Hedge price = LOW minimum of last 5 candles (support level)
+- **Signal SHORT**: Hedge price = HIGH maximum of last 5 candles (resistance level)
+- **Logic**: Risk is calculated on the distance to the natural stop-loss level
+
+**Example Calculation**:
+```
+Balance USDC: 100.0
+Risk Percentage: 1.0% = 1.0 USDC at risk
+Signal Price: 110,860.0 USDC
+Hedge Price: 110,790.0 USDC (resistance for SHORT signal)
+Price Difference: 70.0 USDC
+Calculated Quantity: 1.0 ÷ 70.0 = 0.0143 BTC
+```
+
+**Important**: The cascade multiplication logic remains the same regardless of quantity mode. Only the **starting amount** changes according to your configuration.
 
 ## WebSocket Architecture Details
 
@@ -284,6 +346,7 @@ All operational parameters externalized to `config.py`:
 - Trading symbols and timeframes
 - API endpoints and WebSocket URLs
 - Signal detection thresholds and RSI calculation mode
+- Quantity calculation modes (minimum, fixed, percentage-based risk management)
 - Logging and reconnection settings
 - Hedging system parameters
 

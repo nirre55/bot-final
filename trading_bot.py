@@ -108,7 +108,8 @@ class BinanceTradingBot:
         try:
             # Récupérer la quantité initiale selon la configuration
             initial_qty = self.trading_service.get_initial_trade_quantity(config.SYMBOL)
-            qty_type = "fixe" if config.TRADING_CONFIG["USE_FIXED_INITIAL_QUANTITY"] else "minimale"
+            qty_mode = config.TRADING_CONFIG["QUANTITY_MODE"]
+            qty_type = {"MINIMUM": "minimale", "FIXED": "fixe", "PERCENTAGE": "pourcentage"}.get(qty_mode, qty_mode)
             
             if initial_qty:
                 print(f"[TRADING] Symbole: {config.SYMBOL}")
@@ -133,6 +134,9 @@ class BinanceTradingBot:
         self.logger.debug("_handle_kline_message called")
         
         try:
+            # Stocker les dernières données kline pour le calcul de quantité
+            self._latest_kline_data = kline_data.get('k', {})
+            
             # Vérifier si c'est une fermeture de bougie
             is_candle_closed = kline_data.get('k', {}).get('x', False)
             
@@ -281,6 +285,12 @@ class BinanceTradingBot:
         self.logger.debug("_execute_trade called")
         
         try:
+            # Ajouter le prix actuel au signal pour le calcul de quantité basé sur pourcentage
+            if hasattr(self, '_latest_kline_data') and self._latest_kline_data:
+                current_price = float(self._latest_kline_data.get('c', 0))
+                signal['current_price'] = current_price
+                self.logger.debug(f"Prix actuel ajouté au signal: {current_price}")
+            
             # Exécuter le trade avec le service de trading
             order_result = self.trading_service.execute_signal_trade(signal)
             

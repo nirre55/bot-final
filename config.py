@@ -36,8 +36,9 @@ SIGNAL_CONFIG: Dict[str, Any] = {
 
 # Configuration des quantités de trading
 TRADING_CONFIG: Dict[str, Any] = {
-    "USE_FIXED_INITIAL_QUANTITY": True,  # True: utilise quantité fixe, False: utilise quantité minimale du symbole
-    "INITIAL_QUANTITY": 0.002,  # Quantité de départ fixe (utilisée si USE_FIXED_INITIAL_QUANTITY = True)
+    "QUANTITY_MODE": "PERCENTAGE",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
+    "INITIAL_QUANTITY": 0.002,  # Quantité de départ fixe (mode FIXED)
+    "BALANCE_PERCENTAGE": 0.001,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 0.1%
 }
 
 # Configuration du système de hedging

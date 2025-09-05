@@ -299,12 +299,121 @@ class TradingService:
         self.logger.info(f"Quantité minimale pour {symbol}: {formatted_qty}")
         return formatted_qty
     
-    def get_initial_trade_quantity(self, symbol: str) -> Optional[str]:
+    def _extract_quote_asset(self, symbol: str) -> str:
+        """
+        Extrait l'asset de cotation d'un symbole (ex: BTCUSDC -> USDC)
+        
+        Args:
+            symbol: Symbole de trading (ex: BTCUSDC)
+            
+        Returns:
+            Asset de cotation (ex: USDC)
+        """
+        # Pour la plupart des symboles futures, les assets de cotation sont connus
+        common_quote_assets = ['USDT', 'USDC', 'BTC', 'ETH', 'BNB']
+        
+        for quote_asset in common_quote_assets:
+            if symbol.endswith(quote_asset):
+                return quote_asset
+        
+        # Fallback: assumons que c'est USDT si rien trouvé
+        self.logger.warning(f"Asset de cotation non identifié pour {symbol}, utilisation de USDT par défaut")
+        return 'USDT'
+    
+    def get_quote_asset_balance(self, symbol: str) -> Optional[float]:
+        """
+        Récupère la balance de l'asset de cotation du symbole
+        
+        Args:
+            symbol: Symbole de trading (ex: BTCUSDC)
+            
+        Returns:
+            Balance de l'asset de cotation ou None en cas d'erreur
+        """
+        self.logger.debug(f"get_quote_asset_balance called for {symbol}")
+        
+        try:
+            # Déterminer l'asset de cotation
+            quote_asset = self._extract_quote_asset(symbol)
+            self.logger.info(f"Asset de cotation déterminé pour {symbol}: {quote_asset}")
+            
+            account_balance = self.binance_client.get_account_balance()
+            
+            if not account_balance:
+                self.logger.error("Impossible de récupérer la balance du compte")
+                return None
+            
+            # Chercher la balance de l'asset de cotation
+            for balance_item in account_balance:
+                if balance_item.get("asset") == quote_asset:
+                    available_balance = float(balance_item.get("availableBalance", "0"))
+                    self.logger.info(f"Balance {quote_asset} disponible: {available_balance}")
+                    return available_balance
+            
+            self.logger.warning(f"Balance {quote_asset} non trouvée")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la récupération de la balance {quote_asset}: {e}", exc_info=True)
+            return None
+    
+    def calculate_theoretical_hedge_price(self, current_price: float, signal_type: str) -> Optional[float]:
+        """
+        Calcule le prix théorique du hedge basé sur la configuration
+        
+        Args:
+            current_price: Prix actuel du symbole
+            signal_type: Type de signal ("long" ou "short")
+            
+        Returns:
+            Prix théorique du hedge ou None
+        """
+        self.logger.debug(f"calculate_theoretical_hedge_price called: price={current_price}, signal={signal_type}")
+        
+        try:
+            symbol = config.SYMBOL
+            
+            # Récupérer les données historiques pour analyser high/low
+            from api.market_data import MarketDataClient
+            market_data_client = MarketDataClient()
+            
+            lookback_candles = config.HEDGING_CONFIG["LOOKBACK_CANDLES"]
+            historical_data = market_data_client.get_historical_data(
+                symbol, config.TIMEFRAME, lookback_candles + 1
+            )
+            
+            if historical_data is None or len(historical_data) < lookback_candles:
+                self.logger.error("Données historiques insuffisantes pour le calcul hedge")
+                return None
+            
+            # Analyser les dernières bougies (exclure la bougie courante)
+            recent_data = historical_data.iloc[-lookback_candles-1:-1]
+            
+            if signal_type == "long":
+                # Pour un signal LONG, le hedge sera SHORT -> prix = support (LOW)
+                theoretical_hedge_price = float(recent_data['low'].min())
+                self.logger.info(f"Prix hedge théorique LONG->SHORT: {theoretical_hedge_price}")
+            elif signal_type == "short":
+                # Pour un signal SHORT, le hedge sera LONG -> prix = résistance (HIGH)
+                theoretical_hedge_price = float(recent_data['high'].max())
+                self.logger.info(f"Prix hedge théorique SHORT->LONG: {theoretical_hedge_price}")
+            else:
+                self.logger.error(f"Type de signal invalide: {signal_type}")
+                return None
+            
+            return theoretical_hedge_price
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors du calcul du prix hedge théorique: {e}", exc_info=True)
+            return None
+    
+    def get_initial_trade_quantity(self, symbol: str, signal_data: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """
         Obtient la quantité initiale de trading selon la configuration
         
         Args:
             symbol: Symbole de trading
+            signal_data: Données du signal (nécessaire pour mode PERCENTAGE)
             
         Returns:
             Quantité initiale formatée ou None
@@ -312,33 +421,91 @@ class TradingService:
         self.logger.debug(f"get_initial_trade_quantity called for {symbol}")
         
         try:
-            if config.TRADING_CONFIG["USE_FIXED_INITIAL_QUANTITY"]:
-                # Utiliser la quantité fixe configurée
-                fixed_quantity = config.TRADING_CONFIG["INITIAL_QUANTITY"]
-                self.logger.info(f"Utilisation de la quantité fixe configurée: {fixed_quantity}")
-                
-                # Obtenir le step_size pour formater correctement
-                symbol_info = self.binance_client.get_symbol_info(symbol)
-                if not symbol_info:
-                    self.logger.error(f"Impossible d'obtenir les infos pour {symbol}")
-                    return None
-                
-                lot_size_info = self._extract_lot_size_info(symbol_info)
-                step_size = lot_size_info["step_size"]
-                
-                if step_size == 0:
-                    self.logger.error("Step size invalide")
-                    return None
-                
-                # Formater selon le step_size
-                formatted_qty = self._format_quantity(fixed_quantity, step_size)
-                self.logger.info(f"Quantité initiale fixe formatée: {formatted_qty}")
-                return formatted_qty
-                
-            else:
-                # Utiliser la quantité minimale (comportement actuel)
+            quantity_mode = config.TRADING_CONFIG["QUANTITY_MODE"]
+            self.logger.info(f"Mode de quantité: {quantity_mode}")
+            
+            # Obtenir les infos du symbole pour le formatage
+            symbol_info = self.binance_client.get_symbol_info(symbol)
+            if not symbol_info:
+                self.logger.error(f"Impossible d'obtenir les infos pour {symbol}")
+                return None
+            
+            lot_size_info = self._extract_lot_size_info(symbol_info)
+            step_size = lot_size_info["step_size"]
+            
+            if step_size == 0:
+                self.logger.error("Step size invalide")
+                return None
+            
+            calculated_quantity: float
+            
+            if quantity_mode == "MINIMUM":
+                # Utiliser la quantité minimale du symbole
                 self.logger.info("Utilisation de la quantité minimale du symbole")
                 return self.get_minimum_trade_quantity(symbol)
+                
+            elif quantity_mode == "FIXED":
+                # Utiliser la quantité fixe configurée
+                calculated_quantity = config.TRADING_CONFIG["INITIAL_QUANTITY"]
+                self.logger.info(f"Utilisation de la quantité fixe: {calculated_quantity}")
+                
+            elif quantity_mode == "PERCENTAGE":
+                # Utiliser le pourcentage de la balance
+                if not signal_data:
+                    self.logger.error("Signal data requis pour le mode PERCENTAGE")
+                    return None
+                
+                # Récupérer la balance de l'asset de cotation
+                balance = self.get_quote_asset_balance(symbol)
+                if balance is None or balance <= 0:
+                    quote_asset = self._extract_quote_asset(symbol)
+                    self.logger.warning(f"Balance {quote_asset} insuffisante ou non disponible - fallback vers quantité minimale")
+                    return self.get_minimum_trade_quantity(symbol)
+                
+                # Récupérer le prix actuel depuis les données du signal
+                current_price = signal_data.get("current_price")
+                signal_type = signal_data.get("type")
+                
+                if not current_price or not signal_type:
+                    self.logger.error("Prix actuel ou type de signal manquant dans signal_data")
+                    return None
+                
+                # Calculer le prix hedge théorique
+                hedge_price = self.calculate_theoretical_hedge_price(current_price, signal_type)
+                if hedge_price is None:
+                    self.logger.error("Impossible de calculer le prix hedge théorique")
+                    return None
+                
+                # Calculer la différence de prix
+                price_difference = abs(current_price - hedge_price)
+                self.logger.info(f"Calcul price difference: CurrentPrice={current_price}, HedgePrice={hedge_price}, Diff={price_difference}")
+                
+                if price_difference == 0:
+                    self.logger.error("Différence de prix nulle - calcul impossible")
+                    return None
+                
+                # Calculer la quantité basée sur le pourcentage
+                balance_percentage = config.TRADING_CONFIG["BALANCE_PERCENTAGE"]
+                risk_amount = balance * balance_percentage
+                calculated_quantity = risk_amount / price_difference
+                
+                quote_asset = self._extract_quote_asset(symbol)
+                self.logger.info(f"Mode PERCENTAGE: Balance_{quote_asset}={balance}, Risk%={balance_percentage*100}%, "
+                               f"RiskAmount={risk_amount}, PriceDiff={price_difference}, Qty={calculated_quantity}")
+                
+                # Vérifier si la quantité calculée est trop petite
+                if calculated_quantity <= 0:
+                    self.logger.warning("Quantité calculée nulle ou négative - fallback vers quantité minimale")
+                    return self.get_minimum_trade_quantity(symbol)
+                
+            else:
+                self.logger.error(f"Mode de quantité invalide: {quantity_mode}")
+                return None
+            
+            # Formater selon le step_size
+            formatted_qty = self._format_quantity(calculated_quantity, step_size)
+            self.logger.info(f"Quantité initiale formatée: {formatted_qty} (mode: {quantity_mode})")
+            return formatted_qty
                 
         except Exception as e:
             self.logger.error(f"Erreur lors de la détermination de la quantité initiale: {e}", exc_info=True)
@@ -372,8 +539,8 @@ class TradingService:
                 self.logger.error(f"Type de signal invalide: {signal_type}")
                 return None
             
-            # Obtenir la quantité initiale (fixe ou minimale selon config)
-            initial_quantity = self.get_initial_trade_quantity(symbol)
+            # Obtenir la quantité initiale selon le mode configuré
+            initial_quantity = self.get_initial_trade_quantity(symbol, signal)
             
             if not initial_quantity:
                 self.logger.error("Impossible de déterminer la quantité initiale")
