@@ -299,6 +299,51 @@ class TradingService:
         self.logger.info(f"Quantité minimale pour {symbol}: {formatted_qty}")
         return formatted_qty
     
+    def get_initial_trade_quantity(self, symbol: str) -> Optional[str]:
+        """
+        Obtient la quantité initiale de trading selon la configuration
+        
+        Args:
+            symbol: Symbole de trading
+            
+        Returns:
+            Quantité initiale formatée ou None
+        """
+        self.logger.debug(f"get_initial_trade_quantity called for {symbol}")
+        
+        try:
+            if config.TRADING_CONFIG["USE_FIXED_INITIAL_QUANTITY"]:
+                # Utiliser la quantité fixe configurée
+                fixed_quantity = config.TRADING_CONFIG["INITIAL_QUANTITY"]
+                self.logger.info(f"Utilisation de la quantité fixe configurée: {fixed_quantity}")
+                
+                # Obtenir le step_size pour formater correctement
+                symbol_info = self.binance_client.get_symbol_info(symbol)
+                if not symbol_info:
+                    self.logger.error(f"Impossible d'obtenir les infos pour {symbol}")
+                    return None
+                
+                lot_size_info = self._extract_lot_size_info(symbol_info)
+                step_size = lot_size_info["step_size"]
+                
+                if step_size == 0:
+                    self.logger.error("Step size invalide")
+                    return None
+                
+                # Formater selon le step_size
+                formatted_qty = self._format_quantity(fixed_quantity, step_size)
+                self.logger.info(f"Quantité initiale fixe formatée: {formatted_qty}")
+                return formatted_qty
+                
+            else:
+                # Utiliser la quantité minimale (comportement actuel)
+                self.logger.info("Utilisation de la quantité minimale du symbole")
+                return self.get_minimum_trade_quantity(symbol)
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la détermination de la quantité initiale: {e}", exc_info=True)
+            return None
+    
     def execute_signal_trade(self, signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Exécute un trade basé sur un signal
@@ -327,20 +372,20 @@ class TradingService:
                 self.logger.error(f"Type de signal invalide: {signal_type}")
                 return None
             
-            # Obtenir la quantité minimale
-            min_quantity = self.get_minimum_trade_quantity(symbol)
+            # Obtenir la quantité initiale (fixe ou minimale selon config)
+            initial_quantity = self.get_initial_trade_quantity(symbol)
             
-            if not min_quantity:
-                self.logger.error("Impossible de déterminer la quantité minimale")
+            if not initial_quantity:
+                self.logger.error("Impossible de déterminer la quantité initiale")
                 return None
             
             # Placer l'ordre avec position side pour mode Hedge
-            self.logger.info(f"Placement ordre {side} {min_quantity} {symbol} (position: {position_side})")
+            self.logger.info(f"Placement ordre {side} {initial_quantity} {symbol} (position: {position_side})")
             
             order_result = self.binance_client.place_order(
                 symbol=symbol,
                 side=side,
-                quantity=min_quantity,
+                quantity=initial_quantity,
                 order_type="MARKET",
                 position_side=position_side
             )

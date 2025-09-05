@@ -106,17 +106,18 @@ class BinanceTradingBot:
         self.logger.debug("_display_trading_info called")
         
         try:
-            # Récupérer la quantité minimale depuis le cache
-            min_qty = self.trading_service.get_minimum_trade_quantity(config.SYMBOL)
+            # Récupérer la quantité initiale selon la configuration
+            initial_qty = self.trading_service.get_initial_trade_quantity(config.SYMBOL)
+            qty_type = "fixe" if config.TRADING_CONFIG["USE_FIXED_INITIAL_QUANTITY"] else "minimale"
             
-            if min_qty:
+            if initial_qty:
                 print(f"[TRADING] Symbole: {config.SYMBOL}")
-                print(f"[TRADING] Quantité minimale: {min_qty}")
+                print(f"[TRADING] Quantité initiale ({qty_type}): {initial_qty}")
                 print(f"[TRADING] Type d'ordre: MARKET")
-                self.logger.info(f"Informations de trading affichées: {config.SYMBOL} min={min_qty}")
+                self.logger.info(f"Informations de trading affichées: {config.SYMBOL} qty={initial_qty} (type: {qty_type})")
             else:
-                print(f"[TRADING] ⚠️ Quantité minimale non disponible pour {config.SYMBOL}")
-                self.logger.warning("Quantité minimale non disponible pour l'affichage")
+                print(f"[TRADING] ⚠️ Quantité initiale non disponible pour {config.SYMBOL}")
+                self.logger.warning("Quantité initiale non disponible pour l'affichage")
                 
         except Exception as e:
             self.logger.error(f"Erreur lors de l'affichage des infos trading: {e}", exc_info=True)
