@@ -25,12 +25,13 @@ RECONNECTION_CONFIG: Dict[str, Any] = {
 }
 
 # Configuration détection de signaux de trading
-SIGNAL_CONFIG: Dict[str, Dict[int, Dict[str, int]]] = {
+SIGNAL_CONFIG: Dict[str, Any] = {
+    "RSI_ON_HA": True,  # True: calcul RSI sur données Heikin Ashi, False: calcul RSI normal
     "RSI_THRESHOLDS": {
-        1: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
-        2: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
-        3: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
-    }
+        3: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
+        5: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
+        7: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
+    },
 }
 
 # Configuration du système de hedging

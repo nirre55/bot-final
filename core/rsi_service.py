@@ -8,6 +8,7 @@ import pandas as pd
 import config
 from api.market_data import MarketDataClient
 from indicators.rsi import RSI
+from indicators.heikin_ashi import HeikinAshi
 from core.logger import get_module_logger
 
 
@@ -86,8 +87,20 @@ class RSIService:
                 self.logger.error("Impossible de récupérer les données historiques")
                 return None
             
+            # Déterminer quelles données utiliser pour le calcul RSI
+            if config.SIGNAL_CONFIG["RSI_ON_HA"]:
+                # Calculer les données Heikin Ashi
+                self.logger.info("Calcul RSI sur données Heikin Ashi activé")
+                ha_data = HeikinAshi.compute(historical_data)
+                close_prices = ha_data['HA_close']
+                self.logger.debug(f"Utilisation de {len(close_prices)} prix de clôture HA")
+            else:
+                # Utiliser les données normales
+                self.logger.info("Calcul RSI sur données normales")
+                close_prices = historical_data['close']
+                self.logger.debug(f"Utilisation de {len(close_prices)} prix de clôture normaux")
+            
             # Calculer les RSI pour toutes les périodes
-            close_prices = historical_data['close']
             rsi_results = RSI.calculate_multiple(close_prices, periods)
             
             # Obtenir les dernières valeurs
@@ -153,6 +166,9 @@ class RSIService:
         if not rsi_data:
             return "RSI: Données non disponibles"
         
+        # Déterminer le type de RSI selon la configuration
+        rsi_type = "HA" if config.SIGNAL_CONFIG["RSI_ON_HA"] else "Normal"
+        
         rsi_parts = []
         
         for rsi_key, rsi_info in rsi_data.items():
@@ -172,7 +188,7 @@ class RSIService:
             else:
                 rsi_parts.append(f"{rsi_key}: N/A")
         
-        result = " | ".join(rsi_parts)
+        result = f"RSI ({rsi_type}): " + " | ".join(rsi_parts)
         self.logger.debug(f"RSI formaté: {result}")
         
         return result

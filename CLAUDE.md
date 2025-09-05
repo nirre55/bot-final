@@ -45,6 +45,7 @@ python trading_bot.py
 
 ### Configuration
 - **Trading parameters**: Modify `config.py` (symbol, timeframe, RSI thresholds)
+- **RSI calculation mode**: Set `RSI_ON_HA` in `SIGNAL_CONFIG` (True for HA-based RSI, False for normal RSI)
 - **Logging levels**: Adjust `LOGGING_CONFIG` in `config.py`
 - **Reconnection settings**: Configure `RECONNECTION_CONFIG` for WebSocket resilience
 - **Hedging system**: Configure `HEDGING_CONFIG` for automatic hedge orders
@@ -54,9 +55,13 @@ python trading_bot.py
 
 ### RSI Configuration
 The bot calculates **multiple RSI periods** with different sensitivity thresholds:
-- RSI period 1 (3 candles): 10/90 thresholds (highly sensitive)
-- RSI period 2 (5 candles): 20/80 thresholds (standard)  
-- RSI period 3 (7 candles): 30/70 thresholds (less sensitive)
+- RSI period 3 candles: 10/90 thresholds (highly sensitive)
+- RSI period 5 candles: 20/80 thresholds (standard)  
+- RSI period 7 candles: 30/70 thresholds (less sensitive)
+
+**RSI Calculation Methods**:
+- **Normal RSI** (`RSI_ON_HA: False`): RSI calculated on regular candle close prices
+- **Heikin Ashi RSI** (`RSI_ON_HA: True`): RSI calculated on Heikin Ashi close prices for smoother signals
 
 ### Data Requirements
 - **RSI calculations**: Requires 100 historical candles minimum
@@ -96,6 +101,7 @@ The bot implements a **sequential signal detection system** requiring two distin
 **Step 1: RSI Condition**
 - **LONG Signal**: All 3 RSI periods (3, 5, 7) must be **OVERSOLD** simultaneously
 - **SHORT Signal**: All 3 RSI periods (3, 5, 7) must be **OVERBOUGHT** simultaneously
+- **RSI Source**: Calculated on regular candle prices or Heikin Ashi prices depending on `RSI_ON_HA` setting
 
 **Step 2: HA Confirmation** (after RSI condition is met)
 - **LONG Confirmation**: Green HA candle after RSI oversold
@@ -277,7 +283,7 @@ Key fields from `ORDER_TRADE_UPDATE` events:
 All operational parameters externalized to `config.py`:
 - Trading symbols and timeframes
 - API endpoints and WebSocket URLs
-- Signal detection thresholds
+- Signal detection thresholds and RSI calculation mode
 - Logging and reconnection settings
 - Hedging system parameters
 
