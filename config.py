@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 SYMBOL: str = "BTCUSDC"  # Symbole
-TIMEFRAME: str = "1m"  # Timeframe
+TIMEFRAME: str = "5m"  # Timeframe
 
 # Configuration API Binance
 BINANCE_API_KEY: Optional[str] = os.getenv("BINANCE_API_KEY")
@@ -28,9 +28,9 @@ RECONNECTION_CONFIG: Dict[str, Any] = {
 SIGNAL_CONFIG: Dict[str, Any] = {
     "RSI_ON_HA": True,  # True: calcul RSI sur données Heikin Ashi, False: calcul RSI normal
     "RSI_THRESHOLDS": {
-        1: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
-        2: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
-        3: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
+        5: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
+        14: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
+        21: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
     },
 }
 
@@ -52,7 +52,7 @@ HEDGING_CONFIG: Dict[str, Any] = {
 # Configuration du système de cascade trading
 CASCADE_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver le système de cascade
-    "MAX_ORDERS": 4,  # Nombre maximum d'ordres cascade
+    "MAX_ORDERS": 10,  # Nombre maximum d'ordres cascade
     "POLLING_INTERVAL_SECONDS": 30,  # Intervalle de vérification des ordres (en secondes)
     "RETRY_ATTEMPTS": 3,  # Nombre de tentatives en cas d'erreur (hors fonds insuffisants)
     "RETRY_DELAY_SECONDS": 5,  # Délai entre les tentatives de retry
@@ -61,8 +61,8 @@ CASCADE_CONFIG: Dict[str, Any] = {
 # Configuration du système Take Profit
 TP_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver le système TP
-    "MULTIPLIER": 2.0,  # Multiplicateur pour la distance TP (distance = différence prix * multiplier)
-    "INCREMENT_PERCENT": 0.001,  # Incrément de 0.1% à chaque ordre cascade
+    "BASE_MULTIPLIER": 1.0,  # Multiplicateur de base pour la distance TP (commence à 1x)
+    "POSITION_INCREMENT": 0.001,  # Incrément de 0.1% appliqué sur le prix final à chaque position
     "PRICE_OFFSET": 0.001,  # Offset entre stopPrice et price pour l'ordre limite (0.1%)
 }
 
@@ -75,8 +75,8 @@ LOGGING_CONFIG: Dict[str, Any] = {
     "FILE_LOGGING": {
         "ENABLED": True,
         "FILENAME": "logs/trading_bot.log",
-        "MAX_BYTES": 1048576,  # 1MB (plus petit pour éviter les gros fichiers)
-        "BACKUP_COUNT": 3,
+        "MAX_BYTES": 10485760,  # 10MB (plus petit pour éviter les gros fichiers)
+        "BACKUP_COUNT": 10,
     },
     "CONSOLE_LOGGING": {
         "ENABLED": True,

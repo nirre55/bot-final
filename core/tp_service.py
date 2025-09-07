@@ -30,13 +30,12 @@ class TPService:
         self.hedge_stop_price: Optional[float] = None
         self.tp_distance: Optional[float] = None
         
-        # Niveaux TP de base (avant incréments)
-        self.tp_long_base: Optional[float] = None
-        self.tp_short_base: Optional[float] = None
+        # Information sur quel côté est le signal initial vs hedge
+        self.initial_signal_side: Optional[str] = None  # "LONG" ou "SHORT"
+        self.hedge_side: Optional[str] = None  # "LONG" ou "SHORT"
         
-        # Compteurs d'incréments pour chaque côté
-        self.long_increment_count: int = 0
-        self.short_increment_count: int = 0
+        # Compteur de positions pour multiplicateur linéaire (commence à 1 pour le signal initial)
+        self.position_count: int = 1
         
         # Ordres TP actifs (un par côté maximum)
         self.active_tp_long: Optional[Dict[str, Any]] = None
@@ -68,7 +67,9 @@ class TPService:
     def initialize_tp_levels(
         self, 
         initial_price: float, 
-        hedge_stop_price: float
+        hedge_stop_price: float,
+        initial_signal_side: str,
+        hedge_side: str
     ) -> None:
         """
         Initialise les niveaux TP de base
@@ -76,6 +77,8 @@ class TPService:
         Args:
             initial_price: Prix d'exécution de l'ordre initial (signal)
             hedge_stop_price: Prix de stop de l'ordre hedge
+            initial_signal_side: Côté du signal initial ("LONG" ou "SHORT")
+            hedge_side: Côté du hedge ("LONG" ou "SHORT")
         """
         self.logger.debug(f"initialize_tp_levels called: initial={initial_price}, hedge_stop={hedge_stop_price}")
         
@@ -83,29 +86,29 @@ class TPService:
             self.logger.info("Système TP désactivé dans la configuration")
             return
         
-        # Sauvegarder les prix de référence
+        # Sauvegarder les prix de référence et informations sur les côtés
         self.initial_price = initial_price
         self.hedge_stop_price = hedge_stop_price
+        self.initial_signal_side = initial_signal_side
+        self.hedge_side = hedge_side
         
-        # Calculer la distance TP (une seule fois) avec arrondi pour éviter erreurs de précision
-        distance_raw: float = abs(initial_price - hedge_stop_price) * config.TP_CONFIG["MULTIPLIER"]
-        distance: float = round(distance_raw, 2)  # Arrondir à 2 décimales
-        self.tp_distance = distance
+        # Calculer la distance TP de base (une seule fois)
+        self.tp_distance = abs(initial_price - hedge_stop_price)
         
-        # Calculer les niveaux TP de base avec arrondi
-        self.tp_long_base = round(initial_price + distance, 2)
-        self.tp_short_base = round(hedge_stop_price - distance, 2)
+        # Initialiser le compteur de positions à 1 (pour le signal initial)
+        self.position_count = 1
         
-        self.logger.info(f"Niveaux TP initialisés:")
-        self.logger.info(f"  Distance TP: {self.tp_distance}")
-        self.logger.info(f"  TP LONG base: {self.tp_long_base}")
-        self.logger.info(f"  TP SHORT base: {self.tp_short_base}")
+        self.logger.info(f"Système TP initialisé:")
+        self.logger.info(f"  Prix initial: {self.initial_price} (côté {self.initial_signal_side})")
+        self.logger.info(f"  Prix hedge: {self.hedge_stop_price} (côté {self.hedge_side})")
+        self.logger.info(f"  Distance TP base: {self.tp_distance}")
+        self.logger.info(f"  Position count initial: {self.position_count}")
     
     def create_or_update_tp(
         self, 
         side: TPSide, 
         quantity: float, 
-        is_initial: bool = False
+        increment_position: bool = True
     ) -> bool:
         """
         Crée ou met à jour un ordre TP
@@ -113,18 +116,23 @@ class TPService:
         Args:
             side: Côté du TP (LONG ou SHORT)
             quantity: Quantité totale de la position
-            is_initial: True si c'est le premier TP (pas d'incrément)
+            increment_position: True pour incrémenter le compteur de position
             
         Returns:
             True si succès, False sinon
         """
-        self.logger.debug(f"create_or_update_tp called: {side.value} {quantity} initial={is_initial}")
+        self.logger.debug(f"create_or_update_tp called: {side.value} {quantity} increment={increment_position}")
         
         if not config.TP_CONFIG["ENABLED"] or not self.tp_distance:
             self.logger.debug("TP désactivé ou pas encore initialisé")
             return False
         
         try:
+            # Incrémenter le compteur de position si demandé (à partir du hedge - position 2)
+            if increment_position:
+                self.position_count += 1
+                self.logger.info(f"Position count incrémenté à: {self.position_count}")
+            
             # Annuler l'ancien TP s'il existe
             if side == TPSide.LONG and self.active_tp_long:
                 self._cancel_tp_order(self.active_tp_long)
@@ -133,8 +141,8 @@ class TPService:
                 self._cancel_tp_order(self.active_tp_short)
                 self.active_tp_short = None
             
-            # Calculer le niveau TP avec incréments
-            tp_level = self._calculate_tp_level(side, is_initial)
+            # Calculer le niveau TP avec nouvelle logique
+            tp_level = self._calculate_tp_level(side)
             
             if tp_level is None:
                 self.logger.error(f"Impossible de calculer le niveau TP pour {side.value}")
@@ -148,15 +156,11 @@ class TPService:
                 if side == TPSide.LONG:
                     self.active_tp_long = tp_order
                     self.current_long_quantity = quantity
-                    if not is_initial:
-                        self.long_increment_count += 1
                 else:
                     self.active_tp_short = tp_order
                     self.current_short_quantity = quantity
-                    if not is_initial:
-                        self.short_increment_count += 1
                 
-                self.logger.info(f"✅ TP {side.value} créé/mis à jour - ID: {tp_order.get('orderId')} @ {tp_level}")
+                self.logger.info(f"✅ TP {side.value} créé/mis à jour - ID: {tp_order.get('orderId')} @ {tp_level} (position #{self.position_count})")
                 return True
             else:
                 self.logger.error(f"❌ Échec de création du TP {side.value}")
@@ -166,44 +170,58 @@ class TPService:
             self.logger.error(f"Erreur lors de la gestion TP {side.value}: {e}", exc_info=True)
             return False
     
-    def _calculate_tp_level(self, side: TPSide, is_initial: bool) -> Optional[float]:
+    def _calculate_tp_level(self, side: TPSide) -> Optional[float]:
         """
-        Calcule le niveau TP avec incréments
+        Calcule le niveau TP avec nouvelle logique linéaire
         
         Args:
-            side: Côté du TP
-            is_initial: True si c'est le premier TP
+            side: Côté du TP (LONG ou SHORT)
             
         Returns:
             Niveau TP calculé
         """
-        self.logger.debug(f"_calculate_tp_level called: {side.value} initial={is_initial}")
+        self.logger.debug(f"_calculate_tp_level called: {side.value} position={self.position_count}")
         
-        if side == TPSide.LONG:
-            base_level = self.tp_long_base
-            increment_count = self.long_increment_count if not is_initial else 0
-        else:
-            base_level = self.tp_short_base
-            increment_count = self.short_increment_count if not is_initial else 0
-        
-        if base_level is None:
+        if not self.initial_price or not self.hedge_stop_price or not self.tp_distance:
+            self.logger.error("Prix de référence manquants pour calcul TP")
             return None
         
-        # Calculer l'incrément total
-        increment_percent = config.TP_CONFIG["INCREMENT_PERCENT"]
-        total_increment = increment_count * increment_percent
+        # Calculer le multiplicateur linéaire (1x, 2x, 3x, etc.)
+        current_multiplier = config.TP_CONFIG["BASE_MULTIPLIER"] * self.position_count
+        
+        # Déterminer le prix de référence selon le côté du TP
+        if side.value == self.initial_signal_side:
+            # TP pour le côté du signal initial - utilise prix initial
+            reference_price = self.initial_price
+            self.logger.debug(f"TP {side.value} côté signal - référence: prix initial {reference_price}")
+        elif side.value == self.hedge_side:
+            # TP pour le côté du hedge - utilise prix hedge
+            reference_price = self.hedge_stop_price
+            self.logger.debug(f"TP {side.value} côté hedge - référence: prix hedge {reference_price}")
+        else:
+            self.logger.error(f"Côté TP {side.value} ne correspond ni au signal ni au hedge")
+            return None
+        
+        # Calculer le prix TP avant incrément
+        if side == TPSide.LONG:
+            tp_price_base = reference_price + (self.tp_distance * current_multiplier)
+        else:
+            tp_price_base = reference_price - (self.tp_distance * current_multiplier)
+        
+        # Appliquer l'incrément de 0.01% sur le prix final
+        position_increment = config.TP_CONFIG["POSITION_INCREMENT"]
         
         if side == TPSide.LONG:
-            # LONG : prix monte avec les incréments
-            tp_level_raw = base_level * (1 + total_increment)
+            # LONG : prix monte avec l'incrément
+            tp_level = tp_price_base * (1 + position_increment)
         else:
-            # SHORT : prix descend avec les incréments
-            tp_level_raw = base_level * (1 - total_increment)
+            # SHORT : prix descend avec l'incrément
+            tp_level = tp_price_base * (1 - position_increment)
         
-        # Arrondir le niveau TP final à 2 décimales
-        tp_level = round(tp_level_raw, 2)
+        # Arrondir le niveau TP final
+        tp_level = round(tp_level, 2)
         
-        self.logger.debug(f"TP {side.value}: base={base_level}, incréments={increment_count}, niveau={tp_level}")
+        self.logger.info(f"TP {side.value} calculé: référence={reference_price:.2f}, multiplicateur={current_multiplier}, prix_base={tp_price_base:.2f}, final={tp_level}")
         return tp_level
     
     def _place_tp_order(self, side: TPSide, quantity: float, tp_level: float) -> Optional[Dict[str, Any]]:
@@ -225,17 +243,21 @@ class TPService:
             if side == TPSide.LONG:
                 order_side = "SELL"  # Vendre la position LONG
                 position_side = "LONG"
-                # Prix limite légèrement au-dessus du stop pour meilleur remplissage
-                limit_price = tp_level * (1 + config.TP_CONFIG["PRICE_OFFSET"])
+                # Limit price = valeur TP exacte
+                limit_price = tp_level
+                # Stop price = légèrement en dessous du limit pour trigger
+                stop_price = tp_level * (1 - config.TP_CONFIG["PRICE_OFFSET"])
             else:
                 order_side = "BUY"  # Racheter la position SHORT
                 position_side = "SHORT"
-                # Prix limite légèrement en-dessous du stop
-                limit_price = tp_level * (1 - config.TP_CONFIG["PRICE_OFFSET"])
+                # Limit price = valeur TP exacte
+                limit_price = tp_level
+                # Stop price = légèrement au-dessus du limit pour trigger
+                stop_price = tp_level * (1 + config.TP_CONFIG["PRICE_OFFSET"])
             
             # Utiliser le formatage optimisé avec cache
             formatted_quantity = self._format_tp_quantity(quantity)
-            formatted_stop_price = self._format_tp_price(tp_level)
+            formatted_stop_price = self._format_tp_price(stop_price)
             formatted_limit_price = self._format_tp_price(limit_price)
             
             self.logger.info(f"Placement TP {side.value}: {order_side} {formatted_quantity} @ stop:{formatted_stop_price} limit:{formatted_limit_price}")
@@ -301,8 +323,7 @@ class TPService:
             "tp_distance": self.tp_distance,
             "long_tp_active": self.active_tp_long is not None,
             "short_tp_active": self.active_tp_short is not None,
-            "long_increment_count": self.long_increment_count,
-            "short_increment_count": self.short_increment_count,
+            "position_count": self.position_count,
             "current_long_quantity": self.current_long_quantity,
             "current_short_quantity": self.current_short_quantity
         }
@@ -379,13 +400,12 @@ class TPService:
             self.hedge_stop_price = None
             self.tp_distance = None
             
-            # Reset des niveaux TP de base
-            self.tp_long_base = None
-            self.tp_short_base = None
+            # Reset des informations sur les côtés
+            self.initial_signal_side = None
+            self.hedge_side = None
             
-            # Reset des compteurs d'incréments
-            self.long_increment_count = 0
-            self.short_increment_count = 0
+            # Reset du compteur de position
+            self.position_count = 1
             
             # Reset des ordres TP actifs (déjà fait dans check_tp_execution_and_cleanup)
             self.active_tp_long = None
@@ -415,10 +435,10 @@ class TPService:
         tp_info = []
         
         if status["long_tp_active"]:
-            tp_info.append(f"LONG TP 🎯 (inc:{status['long_increment_count']})")
+            tp_info.append(f"LONG TP 🎯 (pos:{status['position_count']})")
         
         if status["short_tp_active"]:
-            tp_info.append(f"SHORT TP 🎯 (inc:{status['short_increment_count']})")
+            tp_info.append(f"SHORT TP 🎯 (pos:{status['position_count']})")
         
         if tp_info:
             return f"TP: {' | '.join(tp_info)}"

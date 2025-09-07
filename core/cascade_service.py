@@ -340,7 +340,7 @@ class CascadeService:
                 success_long = self.tp_service.create_or_update_tp(
                     side=TPSide.LONG,
                     quantity=self.current_long_quantity,
-                    is_initial=False  # False = avec incrément +0.1%
+                    increment_position=True  # True = incrémenter compteur position
                 )
                 
                 if success_long:
@@ -353,7 +353,7 @@ class CascadeService:
                 success_short = self.tp_service.create_or_update_tp(
                     side=TPSide.SHORT,
                     quantity=self.current_short_quantity,
-                    is_initial=False  # False = avec décrémentation -0.1%
+                    increment_position=False  # False = ne pas incrémenter (déjà fait pour LONG)
                 )
                 
                 if success_short:
@@ -402,7 +402,7 @@ class CascadeService:
                 success_existing = self.tp_service.create_or_update_tp(
                     side=existing_tp_side,
                     quantity=existing_quantity,
-                    is_initial=False  # False = avec incrément +0.1%
+                    increment_position=True  # True = incrémenter compteur position
                 )
                 
                 if success_existing:
@@ -415,7 +415,7 @@ class CascadeService:
                 success_new = self.tp_service.create_or_update_tp(
                     side=new_tp_side,
                     quantity=new_quantity,
-                    is_initial=False  # False = avec décrémentation -0.1% pour le côté opposé
+                    increment_position=False  # False = ne pas incrémenter (déjà fait pour côté existant)
                 )
                 
                 if success_new:

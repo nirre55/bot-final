@@ -641,11 +641,25 @@ class TradingService:
                 self.logger.warning("Service TP non disponible - initialisation ignorée")
                 return
             
-            # Initialiser les niveaux TP dans le service
-            self.tp_service.initialize_tp_levels(initial_price, hedge_stop_price)
+            # Déterminer les côtés signal et hedge
+            initial_side = initial_order.get("side", "").upper()
+            hedge_side = hedge_order.get("side", "").upper()
+            
+            # Convertir en position sides
+            initial_position_side = initial_order.get("positionSide", "BOTH").upper()
+            hedge_position_side = hedge_order.get("positionSide", "BOTH").upper()
+            
+            self.logger.info(f"Côtés - Signal: {initial_side} ({initial_position_side}), Hedge: {hedge_side} ({hedge_position_side})")
+            
+            # Initialiser les niveaux TP dans le service avec informations sur les côtés
+            self.tp_service.initialize_tp_levels(
+                initial_price, 
+                hedge_stop_price, 
+                initial_position_side,  # "LONG" ou "SHORT"
+                hedge_position_side     # "LONG" ou "SHORT"
+            )
             
             # Créer le TP pour la position initiale
-            initial_side = initial_order.get("side", "").upper()
             
             # Extraire la quantité avec fallback
             initial_quantity = 0.0
@@ -684,8 +698,8 @@ class TradingService:
             # Créer TP SEULEMENT pour l'ordre initial (position réelle)
             from core.tp_service import TPSide
             
-            # Déterminer le côté TP pour la position initiale
-            if initial_side == "BUY":
+            # Déterminer le côté TP pour la position initiale (basé sur positionSide)
+            if initial_position_side == "LONG":
                 initial_tp_side = TPSide.LONG
             else:
                 initial_tp_side = TPSide.SHORT
@@ -694,7 +708,7 @@ class TradingService:
             success_initial = self.tp_service.create_or_update_tp(
                 initial_tp_side, 
                 initial_quantity, 
-                is_initial=True
+                increment_position=False  # False = c'est le signal initial (position 1)
             )
             
             if success_initial:

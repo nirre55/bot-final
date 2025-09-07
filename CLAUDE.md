@@ -176,22 +176,54 @@ SHORT executes → LONG 0.012 @ 111200 (stop)
 ### Take Profit (TP) System
 The bot includes **automatic Take Profit management** with dynamic price adjustments:
 
-**TP Logic**:
-- **LONG TP**: Always placed **above** current price (+0.1% increment per cascade order)
-- **SHORT TP**: Always placed **below** current price (-0.1% decrement per cascade order)  
-- **Dynamic Updates**: TP prices updated after each hedge and cascade execution
-- **Parallel Management**: Separate TP orders for LONG and SHORT positions
+**TP Logic** (New Linear System):
+- **Distance Calculation**: `distance = |initial_price - hedge_price|`
+- **Linear Multiplier**: Position count × base multiplier (1x, 2x, 3x, 4x...)
+- **TP LONG**: `initial_price + (distance × position_count) × (1 + 0.1%)`
+- **TP SHORT**: `hedge_price - (distance × position_count) × (1 - 0.1%)`
+- **Position Progression**: Signal=1x, Hedge=2x, Cascade1=3x, Cascade2=4x...
+- **Parallel Management**: Separate TP orders for LONG and SHORT positions with same position count
 
 **TP Configuration** (`TP_CONFIG`):
 - `ENABLED`: Enable/disable automatic TP system
-- `MULTIPLIER`: Distance multiplier for initial TP placement (default: 2.0)
-- `INCREMENT_PERCENT`: Price increment per cascade order (default: 0.001 = 0.1%)
-- `PRICE_OFFSET`: Offset between stop price and limit price (default: 0.001)
+- `BASE_MULTIPLIER`: Base distance multiplier (default: 1.0, grows linearly)
+- `POSITION_INCREMENT`: Percentage increment applied to final TP price (default: 0.001 = 0.1%)
+- `PRICE_OFFSET`: Offset between stop price and limit price for trigger (default: 0.001 = 0.1%)
 
 **TP Updates**:
-- **After hedge execution**: Initial TP creation for both sides
-- **After cascade execution**: All active TPs updated with +/-0.1% increment
-- **Cross-side updates**: LONG cascade execution updates both LONG and SHORT TPs
+- **After signal execution**: Creates initial TP for signal side (position count = 1)
+- **After hedge execution**: Creates TP for hedge side (position count = 2) 
+- **After cascade execution**: Updates both TPs with incremented position count (3x, 4x...)
+- **Cross-side updates**: Each cascade execution updates both LONG and SHORT TPs with same position count
+- **Single increment per cascade**: Position count incremented only once per cascade, shared by both TPs
+
+**TP Order Structure** (Corrected Logic):
+- **Limit Price**: Exact TP value calculated by the system (where you want to sell/buy)
+- **Stop Price**: Trigger price with slight offset from limit price for order activation
+  - **LONG TP** (SELL order): `stop = limit × (1 - 0.1%)` (trigger below limit)
+  - **SHORT TP** (BUY order): `stop = limit × (1 + 0.1%)` (trigger above limit)
+
+**TP Reference Price Logic**:
+- **Signal side TP**: Uses initial signal execution price as reference
+- **Hedge side TP**: Uses hedge stop price as reference
+- **Example**: Signal LONG @50000, Hedge SHORT @49800
+  - **TP LONG** (signal side): Based on 50000 (signal price)
+  - **TP SHORT** (hedge side): Based on 49800 (hedge price)
+
+**Complete TP Update Cycle Example**:
+Signal LONG @50000, Hedge SHORT @49800, Distance=200:
+
+1. **Signal execution** (pos=1): 
+   - TP LONG = (50000 + 200×1) × 1.001 = 50250.2
+2. **Hedge execution** (pos=2):
+   - TP LONG = (50000 + 200×2) × 1.001 = 50450.4
+   - TP SHORT = (49800 - 200×2) × 0.999 = 49350.6
+3. **Cascade 1** (pos=3):
+   - TP LONG = (50000 + 200×3) × 1.001 = 50650.6
+   - TP SHORT = (49800 - 200×3) × 0.999 = 49150.8
+4. **Cascade 2** (pos=4):
+   - TP LONG = (50000 + 200×4) × 1.001 = 50850.8
+   - TP SHORT = (49800 - 200×4) × 0.999 = 48951.0
 
 **WebSocket Implementation**:
 - **Event Detection**: `ORDER_TRADE_UPDATE` with `o.X = "FILLED"` status
