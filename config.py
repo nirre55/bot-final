@@ -36,9 +36,10 @@ SIGNAL_CONFIG: Dict[str, Any] = {
 
 # Configuration des quantités de trading
 TRADING_CONFIG: Dict[str, Any] = {
-    "QUANTITY_MODE": "PERCENTAGE",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
+    "QUANTITY_MODE": "MINIMUM",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
     "INITIAL_QUANTITY": 0.002,  # Quantité de départ fixe (mode FIXED)
     "BALANCE_PERCENTAGE": 0.001,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 0.1%
+    "PROGRESSION_MODE": "STEP",  # "DOUBLE" (actuel) ou "STEP" (incrémentation par pas)
 }
 
 # Configuration du système de hedging
@@ -51,7 +52,7 @@ HEDGING_CONFIG: Dict[str, Any] = {
 # Configuration du système de cascade trading
 CASCADE_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver le système de cascade
-    "MAX_ORDERS": 10,  # Nombre maximum d'ordres cascade
+    "MAX_ORDERS": 4,  # Nombre maximum d'ordres cascade
     "POLLING_INTERVAL_SECONDS": 30,  # Intervalle de vérification des ordres (en secondes)
     "RETRY_ATTEMPTS": 3,  # Nombre de tentatives en cas d'erreur (hors fonds insuffisants)
     "RETRY_DELAY_SECONDS": 5,  # Délai entre les tentatives de retry

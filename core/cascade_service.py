@@ -49,6 +49,9 @@ class CascadeService:
         # Liste des ordres cascade en attente
         self.pending_orders: List[Dict[str, Any]] = []
         
+        # Taille du pas pour le mode STEP (sera définie au démarrage)
+        self.initial_step_size: float = 0.0
+        
         # Ordre hedge initial à surveiller
         self.initial_hedge_order: Optional[Dict[str, Any]] = None
         
@@ -208,6 +211,7 @@ class CascadeService:
         self.initial_short_price = None
         self.current_long_quantity = 0.0
         self.current_short_quantity = 0.0
+        self.initial_step_size = 0.0
         self.cascade_orders_count = 0
         self.pending_orders.clear()
         self.initial_hedge_order = None
@@ -422,6 +426,60 @@ class CascadeService:
         except Exception as e:
             self.logger.error(f"Erreur lors de la mise à jour TP pour hedge: {e}", exc_info=True)
     
+    def _calculate_cascade_quantity(self, target_side: str) -> float:
+        """
+        Calcule la quantité du prochain ordre cascade selon le mode de progression
+        
+        Args:
+            target_side: "LONG" ou "SHORT" - côté de l'ordre à créer
+            
+        Returns:
+            Quantité à commander
+        """
+        self.logger.debug(f"_calculate_cascade_quantity called for {target_side}")
+        
+        try:
+            progression_mode = config.TRADING_CONFIG["PROGRESSION_MODE"]
+            self.logger.debug(f"Mode de progression: {progression_mode}")
+            
+            if progression_mode == "DOUBLE":
+                # Logique actuelle : doublage
+                if target_side == "SHORT":
+                    # Plus de LONG → Créer SHORT
+                    # Quantité = 2 * current_long_quantity - current_short_quantity
+                    quantity = (2 * self.current_long_quantity) - self.current_short_quantity
+                    self.logger.info(f"Mode DOUBLE SHORT: (2 × {self.current_long_quantity}) - {self.current_short_quantity} = {quantity}")
+                else:  # target_side == "LONG"
+                    # Plus de SHORT → Créer LONG
+                    # Quantité = 2 * current_short_quantity - current_long_quantity
+                    quantity = (2 * self.current_short_quantity) - self.current_long_quantity
+                    self.logger.info(f"Mode DOUBLE LONG: (2 × {self.current_short_quantity}) - {self.current_long_quantity} = {quantity}")
+                    
+            elif progression_mode == "STEP":
+                # Nouvelle logique : incrémentation par pas
+                if target_side == "SHORT":
+                    # Objectif : current_long_quantity + step
+                    target_quantity = self.current_long_quantity + self.initial_step_size
+                    # Quantité à commander = target - quantité actuelle du même côté
+                    quantity = target_quantity - self.current_short_quantity
+                    self.logger.info(f"Mode STEP SHORT: target={target_quantity} (LONG:{self.current_long_quantity} + step:{self.initial_step_size}) - current_SHORT:{self.current_short_quantity} = {quantity}")
+                else:  # target_side == "LONG"
+                    # Objectif : current_short_quantity + step  
+                    target_quantity = self.current_short_quantity + self.initial_step_size
+                    # Quantité à commander = target - quantité actuelle du même côté
+                    quantity = target_quantity - self.current_long_quantity
+                    self.logger.info(f"Mode STEP LONG: target={target_quantity} (SHORT:{self.current_short_quantity} + step:{self.initial_step_size}) - current_LONG:{self.current_long_quantity} = {quantity}")
+                    
+            else:
+                self.logger.error(f"Mode de progression invalide: {progression_mode}")
+                return 0
+                
+            return max(quantity, 0)  # S'assurer que la quantité n'est pas négative
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors du calcul de quantité cascade: {e}", exc_info=True)
+            return 0
+    
     async def _create_next_cascade_order(self) -> None:
         """Crée le prochain ordre cascade selon la logique d'alternance"""
         self.logger.debug("_create_next_cascade_order called")
@@ -433,15 +491,13 @@ class CascadeService:
                 next_side = "SELL"
                 next_position_side = "SHORT"
                 stop_price = self.initial_short_price
-                # Quantité = 2 * current_long_quantity - current_short_quantity
-                next_quantity = (2 * self.current_long_quantity) - self.current_short_quantity
+                next_quantity = self._calculate_cascade_quantity("SHORT")
             else:
                 # Plus de SHORT → Créer LONG
                 next_side = "BUY"
                 next_position_side = "LONG"
                 stop_price = self.initial_long_price
-                # Quantité = 2 * current_short_quantity - current_long_quantity
-                next_quantity = (2 * self.current_short_quantity) - self.current_long_quantity
+                next_quantity = self._calculate_cascade_quantity("LONG")
             
             
             if next_quantity <= 0:
@@ -762,6 +818,20 @@ class CascadeService:
                     self.initial_short_price = price
                     self.logger.info(f"Prix SHORT hedge défini: {price}")
                 self.current_short_quantity += quantity
+            
+            # Définir le step_size pour le mode STEP (basé sur la quantité du signal initial)
+            if self.initial_step_size == 0.0:
+                # Le signal initial a une quantité de base, le hedge en a 2x (par défaut)
+                # On prend la plus petite quantité qui correspond au signal initial
+                if self.current_long_quantity > 0 and self.current_short_quantity > 0:
+                    self.initial_step_size = min(self.current_long_quantity, self.current_short_quantity)
+                    self.logger.info(f"Step size défini pour mode STEP: {self.initial_step_size} (quantité signal initial)")
+                else:
+                    # Si on n'a qu'un côté, utiliser la moitié (car le hedge fait 2x le signal)
+                    total_quantity = self.current_long_quantity + self.current_short_quantity
+                    self.initial_step_size = total_quantity / 3  # Signal = 1x, Hedge = 2x, donc total/3
+                    self.logger.info(f"Step size estimé pour mode STEP: {self.initial_step_size}")
+            
             
             # Créer/mettre à jour les TP pour hedge
             if self.tp_service and config.TP_CONFIG["ENABLED"]:

@@ -25,12 +25,15 @@ class SignalType(Enum):
 class SignalService:
     """Service de détection de signaux de trading à 2 étapes"""
     
-    def __init__(self, cascade_service=None) -> None:
+    def __init__(self, cascade_service=None, tp_service=None) -> None:
         """Initialise le service de signaux"""
         self.logger = get_module_logger("SignalService")
         
         # Référence au service cascade (injection de dépendance)
         self.cascade_service = cascade_service
+        
+        # Référence au service TP (injection de dépendance)
+        self.tp_service = tp_service
         
         # État du système de signaux
         self.current_state: SignalState = SignalState.WAITING
@@ -158,6 +161,11 @@ class SignalService:
             self.logger.debug("Cascade active - nouveaux signaux ignorés")
             return None
         
+        # Vérifier si des TPs sont encore actifs - bloquer les nouveaux signaux
+        if self.tp_service and self._are_tp_orders_active():
+            self.logger.debug("TPs actifs - nouveaux signaux ignorés")
+            return None
+        
         if not rsi_data or not ha_data:
             self.logger.debug("Données manquantes - pas de traitement")
             return None
@@ -215,6 +223,35 @@ class SignalService:
             return self.confirmed_signal
         
         return None
+    
+    def _are_tp_orders_active(self) -> bool:
+        """
+        Vérifie si des ordres TP sont encore actifs
+        
+        Returns:
+            True si au moins un TP est actif
+        """
+        self.logger.debug("_are_tp_orders_active called")
+        
+        if not self.tp_service:
+            return False
+        
+        try:
+            tp_status = self.tp_service.get_tp_status()
+            
+            # Vérifier s'il y a des TPs actifs
+            long_tp_active = tp_status.get("long_tp_active", False)
+            short_tp_active = tp_status.get("short_tp_active", False)
+            
+            if long_tp_active or short_tp_active:
+                self.logger.info(f"TPs actifs détectés - LONG: {long_tp_active}, SHORT: {short_tp_active}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la vérification des TPs actifs: {e}", exc_info=True)
+            return False
     
     def reset_signal(self) -> None:
         """Remet à zéro le système de signaux"""

@@ -47,7 +47,7 @@ class BinanceTradingBot:
         self.cascade_service = CascadeService(self.binance_client, self.tp_service)
         
         # Créer les services avec injection des dépendances
-        self.signal_service = SignalService(self.cascade_service)
+        self.signal_service = SignalService(self.cascade_service, self.tp_service)
         self.trading_service = TradingService(self.cascade_service, self.tp_service)
         
         # Configurer les références TradingService pour formatage dynamique

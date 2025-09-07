@@ -46,7 +46,7 @@ python trading_bot.py
 ### Configuration
 - **Trading parameters**: Modify `config.py` (symbol, timeframe, RSI thresholds)
 - **RSI calculation mode**: Set `RSI_ON_HA` in `SIGNAL_CONFIG` (True for HA-based RSI, False for normal RSI)
-- **Quantity calculation**: Configure `TRADING_CONFIG` with three modes (minimum, fixed, percentage-based)
+- **Quantity system**: Configure `TRADING_CONFIG` with dual parameters (quantity mode + progression mode)
 - **Logging levels**: Adjust `LOGGING_CONFIG` in `config.py`
 - **Reconnection settings**: Configure `RECONNECTION_CONFIG` for WebSocket resilience
 - **Hedging system**: Configure `HEDGING_CONFIG` for automatic hedge orders
@@ -115,6 +115,18 @@ The bot implements a **sequential signal detection system** requiring two distin
 
 **Important**: The two steps must be **sequential**, not simultaneous. Once HA confirmation is received, the signal remains valid even if RSI values exit oversold/overbought zones.
 
+### Signal Blocking Logic
+The bot implements **comprehensive signal blocking** to prevent conflicting trades:
+
+**Cascade Active Block**: New signals are blocked while cascade trading is active
+- Check: `cascade_service.is_cascade_active()`
+- Purpose: Prevent multiple concurrent cascade cycles
+
+**TP Active Block**: New signals are blocked while Take Profit orders are active
+- Check: `tp_service.get_tp_status()` for active LONG or SHORT TPs
+- Purpose: Prevent new signals until current TPs are reached or cancelled
+- **Critical**: Ensures system waits for TP resolution before starting new trading cycles
+
 ### Heikin Ashi Display
 - **Green 🟢**: Bullish HA candle (HA_close > HA_open)
 - **Red 🔴**: Bearish HA candle (HA_close < HA_open)  
@@ -157,7 +169,7 @@ SHORT executes → LONG 0.012 @ 111200 (stop)
 
 **Cascade Configuration** (`CASCADE_CONFIG`):
 - `ENABLED`: Enable/disable cascade trading system
-- `MAX_ORDERS`: Maximum number of cascade orders (default: 10)
+- `MAX_ORDERS`: Maximum number of cascade orders (default: 4)
 - `RETRY_ATTEMPTS`: Retry count for failed orders (excluding insufficient funds)
 - `RETRY_DELAY_SECONDS`: Delay between retry attempts
 
@@ -225,42 +237,49 @@ The cascade system includes **advanced error handling** for production reliabili
 - **Hedge Mode**: Uses Binance hedge mode with position sides (LONG/SHORT)
 - **Order Types**: MARKET orders for signals, STOP_MARKET orders for hedges and cascade
 - **Price Recovery**: Retrieves execution prices via API for accuracy
-- **Quantity Management**: Three quantity modes (minimum, fixed, percentage) with dynamic balance detection and proper formatting
+- **Quantity Management**: Flexible dual-parameter system (quantity calculation + progression mode) with dynamic balance detection
 
-## Initial Quantity Configuration
+## Trading Quantity Configuration
 
-The bot supports three modes for determining the initial trading quantity:
+The bot supports a flexible quantity system with two independent parameters:
 
-### Minimum Quantity Mode
+### Quantity Calculation Modes
+
+**QUANTITY_MODE**: Determines how the initial trading quantity is calculated
+
+#### Minimum Quantity Mode
 ```python
 TRADING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MODE": "MINIMUM",  # Use symbol's minimum quantity
     "INITIAL_QUANTITY": 0.002,  # Ignored in this mode
     "BALANCE_PERCENTAGE": 0.01,  # Ignored in this mode
+    "PROGRESSION_MODE": "STEP",  # How cascade progresses
 }
 ```
 - Uses the symbol's minimum trading quantity from Binance
 - Automatically complies with symbol's lot size requirements
 - Conservative approach ensuring all trades are valid
 
-### Fixed Quantity Mode
+#### Fixed Quantity Mode
 ```python
 TRADING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MODE": "FIXED",  # Use custom fixed quantity
     "INITIAL_QUANTITY": 0.002,  # Your desired starting quantity
     "BALANCE_PERCENTAGE": 0.01,  # Ignored in this mode
+    "PROGRESSION_MODE": "STEP",  # How cascade progresses
 }
 ```
 - Uses a custom fixed quantity as starting amount
 - Still respects symbol's step size for proper formatting
 - Allows for larger initial positions and custom risk management
 
-### Percentage-Based Quantity Mode (Advanced)
+#### Percentage-Based Quantity Mode (Advanced Risk Management)
 ```python
 TRADING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MODE": "PERCENTAGE",  # Risk percentage of balance
     "INITIAL_QUANTITY": 0.002,  # Ignored in this mode
     "BALANCE_PERCENTAGE": 0.01,  # 1% of balance at risk
+    "PROGRESSION_MODE": "STEP",  # How cascade progresses
 }
 ```
 - **Advanced risk management**: Calculates quantity based on percentage of available balance
@@ -268,8 +287,6 @@ TRADING_CONFIG: Dict[str, Any] = {
 - **Formula**: `Quantity = (Balance × Percentage) ÷ |Signal_Price - Hedge_Price|`
 - **Risk control**: You risk exactly the specified percentage on the price difference between signal and hedge
 - **Fallback safety**: If balance is insufficient or unavailable, automatically falls back to minimum quantity
-
-### Percentage Mode Technical Details
 
 **Price Difference Calculation**:
 - **Signal LONG**: Hedge price = LOW minimum of last 5 candles (support level)
@@ -286,7 +303,66 @@ Price Difference: 70.0 USDC
 Calculated Quantity: 1.0 ÷ 70.0 = 0.0143 BTC
 ```
 
-**Important**: The cascade multiplication logic remains the same regardless of quantity mode. Only the **starting amount** changes according to your configuration.
+### Cascade Progression Modes
+
+**PROGRESSION_MODE**: Determines how cascade order quantities progress
+
+#### Double Progression (Exponential Growth)
+```python
+"PROGRESSION_MODE": "DOUBLE"
+```
+- **Logic**: Each cascade order doubles the position to maintain alternating advantage
+- **Formula**: `Next_Order = (2 × Triggered_Quantity) - Existing_Same_Side`
+- **Growth pattern**: 0.01 → 0.02 → 0.04 → 0.08 → 0.16...
+- **Advantages**: Rapid position scaling, higher profit potential
+- **Risk**: Exponential capital requirement
+
+**Example DOUBLE progression**:
+```
+Signal LONG: 0.01 BTC
+Hedge SHORT: 0.02 BTC (2x signal)
+Cascade LONG: 0.03 BTC (to reach net 0.04 LONG vs 0.02 SHORT)
+Cascade SHORT: 0.06 BTC (to reach net 0.08 SHORT vs 0.04 LONG)
+Cascade LONG: 0.12 BTC (to reach net 0.16 LONG vs 0.08 SHORT)
+```
+
+#### Step Progression (Linear Growth)
+```python
+"PROGRESSION_MODE": "STEP"
+```
+- **Logic**: Each cascade order increments position by a fixed step size
+- **Formula**: `Next_Order = (Current_Opposite + Step) - Current_Same_Side`
+- **Growth pattern**: 0.01 → 0.02 → 0.03 → 0.04 → 0.05...
+- **Step size**: Automatically determined from initial signal quantity
+- **Advantages**: Controlled risk, predictable capital requirement
+- **Risk**: Slower position scaling
+
+**Example STEP progression**:
+```
+Signal LONG: 0.01 BTC (step = 0.01)
+Hedge SHORT: 0.02 BTC
+Cascade LONG: 0.01 BTC (to reach net 0.02 LONG vs 0.02 SHORT) 
+Cascade SHORT: 0.01 BTC (to reach net 0.02 SHORT vs 0.03 LONG)
+Cascade LONG: 0.01 BTC (to reach net 0.04 LONG vs 0.03 SHORT)
+```
+
+### Configuration Combinations
+
+The two parameters work independently, allowing flexible strategies:
+
+```python
+# Conservative fixed-step strategy
+"QUANTITY_MODE": "MINIMUM", "PROGRESSION_MODE": "STEP"
+
+# Aggressive fixed-double strategy  
+"QUANTITY_MODE": "FIXED", "PROGRESSION_MODE": "DOUBLE"
+
+# Advanced risk-managed step strategy
+"QUANTITY_MODE": "PERCENTAGE", "PROGRESSION_MODE": "STEP"
+
+# High-risk percentage-double strategy
+"QUANTITY_MODE": "PERCENTAGE", "PROGRESSION_MODE": "DOUBLE"
+```
 
 ## WebSocket Architecture Details
 
@@ -346,7 +422,7 @@ All operational parameters externalized to `config.py`:
 - Trading symbols and timeframes
 - API endpoints and WebSocket URLs
 - Signal detection thresholds and RSI calculation mode
-- Quantity calculation modes (minimum, fixed, percentage-based risk management)
+- Quantity system with dual parameters (calculation modes + progression modes)
 - Logging and reconnection settings
 - Hedging system parameters
 
