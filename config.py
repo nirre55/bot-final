@@ -28,9 +28,9 @@ RECONNECTION_CONFIG: Dict[str, Any] = {
 SIGNAL_CONFIG: Dict[str, Any] = {
     "RSI_ON_HA": True,  # True: calcul RSI sur données Heikin Ashi, False: calcul RSI normal
     "RSI_THRESHOLDS": {
-        5: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
-        14: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
-        21: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
+        3: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
+        5: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
+        7: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
     },
 }
 
@@ -58,7 +58,20 @@ CASCADE_CONFIG: Dict[str, Any] = {
     "RETRY_DELAY_SECONDS": 5,  # Délai entre les tentatives de retry
 }
 
-# Configuration du système Take Profit
+# Configuration des stratégies de trading
+STRATEGY_CONFIG: Dict[str, Any] = {
+    "STRATEGY_TYPE": "ACCUMULATOR",  # "ACCUMULATOR" ou "CASCADE_MASTER"
+}
+
+# Configuration stratégie ACCUMULATOR
+ACCUMULATOR_CONFIG: Dict[str, Any] = {
+    "ENABLED": True,  # Activer/désactiver la stratégie accumulator
+    "TP_PERCENT": 0.003,  # Pourcentage TP (0.3% par défaut)
+    "MAX_ACCUMULATIONS": 10,  # Nombre maximum d'accumulations par côté
+    "PRICE_OFFSET": 0.001,  # Offset entre stopPrice et price pour l'ordre limite (0.1%)
+}
+
+# Configuration du système Take Profit (CASCADE_MASTER seulement)
 TP_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver le système TP
     "BASE_MULTIPLIER": 1.0,  # Multiplicateur de base pour la distance TP (commence à 1x)

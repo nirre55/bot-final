@@ -19,6 +19,7 @@ from core.signal_service import SignalService
 from core.trading_service import TradingService
 from core.cascade_service import CascadeService
 from core.tp_service import TPService
+from strategies.strategy_manager import StrategyManager
 from websocket.websocket_manager import WebSocketManager
 from websocket.user_data_manager import UserDataStreamManager
 
@@ -46,6 +47,9 @@ class BinanceTradingBot:
         self.tp_service = TPService(self.binance_client)
         self.cascade_service = CascadeService(self.binance_client, self.tp_service)
         
+        # Créer le manager de stratégies
+        self.strategy_manager = StrategyManager(self.binance_client)
+        
         # Créer les services avec injection des dépendances
         self.signal_service = SignalService(self.cascade_service, self.tp_service)
         self.trading_service = TradingService(self.cascade_service, self.tp_service)
@@ -53,6 +57,12 @@ class BinanceTradingBot:
         # Configurer les références TradingService pour formatage dynamique
         self.tp_service.set_trading_service_reference(self.trading_service)
         self.cascade_service.set_trading_service_reference(self.trading_service)
+        
+        # Initialiser la stratégie selon la configuration
+        strategy_initialized = self.strategy_manager.initialize_strategy(self.trading_service)
+        if not strategy_initialized:
+            self.logger.error("❌ Échec initialisation stratégie - Arrêt du bot")
+            raise RuntimeError("Impossible d'initialiser la stratégie de trading")
         
         # Variables pour gérer la mise à jour des RSI et HA
         self.cached_rsi_data: Optional[Dict[str, Dict]] = None
@@ -291,8 +301,8 @@ class BinanceTradingBot:
                 signal['current_price'] = current_price
                 self.logger.debug(f"Prix actuel ajouté au signal: {current_price}")
             
-            # Exécuter le trade avec le service de trading
-            order_result = self.trading_service.execute_signal_trade(signal)
+            # Exécuter le trade via le manager de stratégies
+            order_result = self.strategy_manager.execute_signal(signal, self.trading_service)
             
             if order_result:
                 # Trade réussi - afficher le résultat
@@ -419,10 +429,15 @@ class BinanceTradingBot:
             self.logger.error(f"Erreur lors de l'exécution du bot: {e}", exc_info=True)
             print(f"\nErreur lors de l'exécution du bot: {e}")
         finally:
-            # Arrêt propre des WebSocket managers
+            # Arrêt propre des WebSocket managers et stratégies
             self.logger.info("Nettoyage final et fermeture du bot")
             self.websocket_manager.stop()
             await self.user_data_manager.stop()
+            
+            # Nettoyer le manager de stratégies
+            if hasattr(self, 'strategy_manager'):
+                self.strategy_manager.cleanup()
+            
             # Attendre un moment pour que les connexions se ferment proprement
             await asyncio.sleep(1)
             self.display.display_shutdown_info()

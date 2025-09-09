@@ -12,7 +12,8 @@ This is a Python-based **Binance futures trading bot** that connects to real-tim
 The bot follows a **layered architecture** where each component has a single responsibility:
 
 - **`trading_bot.py`**: Main orchestrator that coordinates all services and handles WebSocket message processing
-- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService, TradingService, CascadeService)  
+- **Strategy Layer** (`strategies/`): Trading strategy implementations and management (StrategyManager, CascadeMaster, Accumulator)
+- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService, TradingService, CascadeService, AccumulatorService)  
 - **Indicator Layer** (`indicators/`): Pure calculation logic (RSI, Heikin Ashi)
 - **API Layer** (`api/`): External service communication (Binance REST API, market data)
 - **WebSocket Layer** (`websocket/`): Dual WebSocket streams (klines + User Data Stream) with auto-reconnection
@@ -24,8 +25,10 @@ The bot triggers calculations **only on candle close events** detected through W
 3. RSI calculation → `_calculate_and_display_ha()`
 4. Display both RSI values and HA candle color with emojis
 5. Process signal detection → `_process_signal_detection()`
-6. Execute trade with automatic hedging → `_execute_trade()`
-7. Start cascade trading system → `CascadeService.start_cascade()`
+6. Execute trade via strategy manager → `StrategyManager.execute_signal()`
+7. Strategy-specific execution:
+   - **CASCADE_MASTER**: Full trading system (hedge + cascade + TP)
+   - **ACCUMULATOR**: Simple orders with accumulation logic
 8. Real-time order execution detection via User Data Stream → `UserDataStreamManager`
 
 ## Common Commands
@@ -93,6 +96,66 @@ Comprehensive logging with file rotation:
 - **Rotation**: 1MB max size, 3 backup files
 - **Module-specific loggers**: Each component uses `get_module_logger()`
 - **Format**: Timestamp | Level | Module.Function | Message
+
+## Trading Strategies
+
+The bot implements **two distinct trading strategies** with automatic switching via configuration:
+
+### Strategy Selection
+```python
+# In config.py - Current configuration
+STRATEGY_CONFIG = {
+    "STRATEGY_TYPE": "ACCUMULATOR",  # Currently active strategy
+}
+```
+
+**Available Strategies**:
+- `"CASCADE_MASTER"` - Advanced strategy with hedge + cascade + dynamic TP
+- `"ACCUMULATOR"` - Simple strategy with position accumulation + fixed TP
+
+**Strategy Switching**: Change `STRATEGY_TYPE` in config and restart the bot.
+
+### CASCADE_MASTER Strategy (Advanced)
+**Full-featured strategy** with hedge protection and cascade trading:
+
+**Workflow**:
+1. **Signal detected** → Market order execution
+2. **Hedge creation** → Stop order at support/resistance 
+3. **TP system** → Dynamic take profit levels with linear progression
+4. **Cascade trading** → Alternating orders with increasing quantities
+5. **Real-time management** → WebSocket-driven execution detection
+
+**Features**:
+- ✅ **Hedge orders** for risk management
+- ✅ **Cascade system** with up to 10 orders
+- ✅ **Advanced TP** with position-based increments
+- ✅ **Real-time execution** via User Data Stream
+
+### ACCUMULATOR Strategy (Simple)
+**Position accumulation** with average price management:
+
+**Workflow**:
+1. **Signal detected** → Market order execution (same quantity)
+2. **Price averaging** → Retrieve average position price via API
+3. **TP update** → Single TP at ±0.3% from average price
+4. **Accumulation** → Repeat process for multiple signals (max 10)
+5. **Independent sides** → LONG and SHORT positions in parallel
+
+**Features**:
+- ❌ **No hedge orders** (direct exposure)
+- ❌ **No cascade system** (simple accumulation)
+- ✅ **Simple TP** at fixed percentage from average
+- ✅ **Position averaging** via Binance API
+
+**Configuration**:
+```python
+ACCUMULATOR_CONFIG = {
+    "ENABLED": True,
+    "TP_PERCENT": 0.003,       # 0.3% TP from average price (updated)
+    "MAX_ACCUMULATIONS": 10,   # Max positions per side
+    "PRICE_OFFSET": 0.001,     # 0.1% trigger offset
+}
+```
 
 ## Trading Signal System
 
@@ -492,3 +555,47 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 ### Maintenance Rules
 - **Test file cleanup**: Always remove temporary test files
 - **Minimal abstractions**: Only add abstractions when truly necessary
+
+## System Status & Recent Changes
+
+### Current Configuration (2025-09-08)
+- **Active Strategy**: `ACCUMULATOR` (simple accumulation strategy)
+- **TP Percentage**: 0.3% from average position price
+- **Max Accumulations**: 10 positions per side (LONG/SHORT)
+- **Symbol**: `BTCUSDC` on 5-minute timeframe
+- **RSI Periods**: 3/5/7 with thresholds 10/20/30 - 90/80/70
+
+### Strategy System Architecture ✅
+```
+🏗️ Strategy Pattern Implementation
+├── strategies/
+│   ├── base_strategy.py           # Abstract strategy interface
+│   ├── cascade_master_strategy.py # Advanced strategy (hedge+cascade+TP)
+│   ├── accumulator_strategy.py    # Simple strategy (accumulation+TP)
+│   ├── strategy_factory.py        # Strategy creation factory
+│   └── strategy_manager.py        # Strategy orchestration manager
+├── core/
+│   └── accumulator_service.py     # Position accumulation service
+└── trading_bot.py                 # Integrated with StrategyManager
+```
+
+### Recent Fixes ✅
+1. **Strategy Integration**: Successfully integrated strategy pattern into main bot
+2. **ACCUMULATOR Corrections**: Fixed `get_initial_trade_quantity()` calls with missing `symbol` parameter
+3. **Configuration Updates**: TP percentage adjusted from 1% to 0.3% for better performance
+4. **Strategy Switching**: Verified CASCADE_MASTER ↔ ACCUMULATOR switching works correctly
+
+### Take Profit Orders
+Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
+- **Order Type**: `"TAKE_PROFIT"` (not MARKET orders)
+- **Stop Price**: Trigger level with small offset (±0.1%)  
+- **Limit Price**: Exact TP target price
+- **Execution**: Triggered when price reaches stop, executes at limit price
+
+### Validated Features ✅
+- ✅ **Strategy switching** between CASCADE_MASTER and ACCUMULATOR
+- ✅ **ACCUMULATOR**: Simple orders without hedge/cascade systems
+- ✅ **CASCADE_MASTER**: Full hedge + cascade + advanced TP preserved
+- ✅ **Take Profit**: Both strategies use proper TAKE_PROFIT limit orders
+- ✅ **Configuration**: Real-time strategy selection via config changes
+- ✅ **Error Handling**: Comprehensive logging and error recovery
