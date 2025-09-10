@@ -354,6 +354,51 @@ class BinanceAPIClient:
             self.logger.error(f"Erreur lors de la récupération du statut d'ordre: {e}", exc_info=True)
             return None
     
+    def get_open_orders(self, symbol: str) -> list[Dict[str, Any]]:
+        """
+        Récupère tous les ordres ouverts pour un symbole
+        
+        Args:
+            symbol: Symbole de trading
+            
+        Returns:
+            Liste des ordres ouverts
+        """
+        self.logger.debug(f"get_open_orders called: {symbol}")
+        
+        try:
+            endpoint = "/fapi/v1/openOrders"
+            timestamp = int(time.time() * 1000)
+            
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "timestamp": timestamp
+            }
+            
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+            
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            response = requests.get(
+                f"{self.base_url}{endpoint}",
+                params=params,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                orders = response.json()
+                self.logger.debug(f"Ordres ouverts récupérés: {len(orders)} ordres")
+                return orders
+            else:
+                self.logger.error(f"Erreur récupération ordres ouverts: {response.status_code} - {response.text}")
+                return []
+                
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la récupération des ordres ouverts: {e}", exc_info=True)
+            return []
+    
     def place_take_profit_order(
         self,
         symbol: str,

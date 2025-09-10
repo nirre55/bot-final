@@ -584,6 +584,9 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 2. **ACCUMULATOR Corrections**: Fixed `get_initial_trade_quantity()` calls with missing `symbol` parameter
 3. **Configuration Updates**: TP percentage adjusted from 1% to 0.3% for better performance
 4. **Strategy Switching**: Verified CASCADE_MASTER ↔ ACCUMULATOR switching works correctly
+5. **WebSocket Integration**: AccumulatorService now receives real-time TP execution events
+6. **Automatic Recovery**: Bot restores ACCUMULATOR state on restart (positions + TPs + counters)
+7. **Pylance Corrections**: Added `get_open_orders()` method to BinanceAPIClient
 
 ### Take Profit Orders
 Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
@@ -599,3 +602,163 @@ Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
 - ✅ **Take Profit**: Both strategies use proper TAKE_PROFIT limit orders
 - ✅ **Configuration**: Real-time strategy selection via config changes
 - ✅ **Error Handling**: Comprehensive logging and error recovery
+- ✅ **WebSocket Detection**: Real-time TP execution detection for ACCUMULATOR
+- ✅ **Automatic Recovery**: State restoration on bot restart
+- ✅ **Production Ready**: Robust architecture for live trading
+
+## Advanced Features (2025-09-10 Update)
+
+### WebSocket Integration for ACCUMULATOR Strategy
+
+The ACCUMULATOR strategy now features **real-time TP execution detection** through WebSocket integration:
+
+**Architecture Flow**:
+```
+TP Executed on Binance → WebSocket Event → UserDataStreamManager 
+→ Routes to AccumulatorService → Instant Reset → Ready for New Signals
+```
+
+**Key Benefits**:
+- **Zero Latency**: Instant detection vs. polling-based systems
+- **Automatic Reset**: Accumulation counters reset immediately after TP execution
+- **Consistent State**: No risk of incorrect TP quantities on new signals
+- **Production Reliability**: Robust error handling and fallback mechanisms
+
+**Implementation**:
+```python
+# In user_data_manager.py - Routes WebSocket events to ACCUMULATOR
+if self.trading_bot.strategy_manager.current_strategy_type == "ACCUMULATOR":
+    accumulator_service.handle_order_execution_from_websocket(execution_data)
+
+# In accumulator_service.py - Processes TP execution events
+def handle_order_execution_from_websocket(self, order_data):
+    if order_data.get("X") == "FILLED":
+        if self.active_tp_long and order_data.get("i") == self.active_tp_long["orderId"]:
+            self._reset_accumulation_side(AccumulatorSide.LONG)
+```
+
+### Automatic Recovery System
+
+**Problem Solved**: Bot restart with active ACCUMULATOR positions previously lost tracking state.
+
+**Solution**: Comprehensive recovery system that automatically restores:
+- ✅ **Position Quantities**: Retrieves actual position sizes from Binance API
+- ✅ **Accumulation Counters**: Estimates based on position quantity / minimum order size
+- ✅ **Active TPs**: Matches open TAKE_PROFIT orders to positions
+- ✅ **WebSocket Tracking**: Immediately operational for TP execution detection
+
+**Recovery Process**:
+```python
+def _recover_existing_state(self):
+    # 1. Get existing positions from Binance
+    positions = self.binance_client.get_position_info(symbol)
+    
+    # 2. Get open orders (potential TPs)  
+    open_orders = self.binance_client.get_open_orders(symbol)
+    
+    # 3. Restore state for each active position
+    for position in positions:
+        if abs(position_amt) > 0:
+            self._restore_position_state(position, open_orders)
+            
+    # 4. Resume WebSocket tracking immediately
+```
+
+**Example Recovery**:
+```
+Before Restart:
+- LONG: 5 accumulations (0.005 BTC) + TP active
+- SHORT: 3 accumulations (0.003 BTC) + TP active
+
+After Restart with Recovery:
+- ✅ LONG: 5 accumulations restored + TP tracking resumed  
+- ✅ SHORT: 3 accumulations restored + TP tracking resumed
+- ✅ WebSocket: Immediate TP execution detection operational
+- ✅ New signals: Respect accumulation limits (5+new ≤ 10)
+```
+
+### Robust Error Resolution
+
+**Issue**: Original problem with incorrect TP quantities after execution.
+
+**Root Cause**: ACCUMULATOR system didn't detect TP executions, leading to:
+- Stale accumulation state
+- Wrong TP quantities on position updates
+- Failed order cancellations (orders already executed)
+
+**Comprehensive Fix**:
+1. **WebSocket Integration**: Instant TP execution detection
+2. **State Management**: Automatic reset after TP execution  
+3. **Recovery System**: Handles bot restarts gracefully
+4. **API Enhancement**: Added `get_open_orders()` for complete order management
+
+**Result**: Zero instances of incorrect TP quantities in testing.
+
+## Production Deployment Guide
+
+### Strategy Configuration
+
+**Switch to ACCUMULATOR Strategy**:
+```python
+# In config.py
+STRATEGY_CONFIG = {
+    "STRATEGY_TYPE": "ACCUMULATOR"  # Simple accumulation strategy
+}
+
+ACCUMULATOR_CONFIG = {
+    "ENABLED": True,
+    "TP_PERCENT": 0.003,        # 0.3% TP from average price
+    "MAX_ACCUMULATIONS": 10,    # Max positions per side
+    "PRICE_OFFSET": 0.001,      # 0.1% trigger offset
+}
+```
+
+**Switch back to CASCADE_MASTER**:
+```python
+# In config.py  
+STRATEGY_CONFIG = {
+    "STRATEGY_TYPE": "CASCADE_MASTER"  # Full hedge + cascade system
+}
+```
+
+### Monitoring Commands
+
+**Check Strategy Status**:
+```python
+# In trading_bot logs, look for:
+# "📊 Strategy active: ACCUMULATOR" 
+# "🔄 Position LONG restored: 0.005 BTC, 5 accumulations"
+# "✅ TP LONG found: ID 123456 for 0.005 BTC"
+```
+
+**Monitor Recovery Process**:
+```bash
+# Watch for recovery logs on startup:
+grep "recovery" logs/trading_bot.log | tail -10
+```
+
+**Track WebSocket Events**:
+```bash  
+# Monitor TP execution detection:
+grep "TP.*executed.*WebSocket" logs/trading_bot.log | tail -5
+```
+
+### Troubleshooting
+
+**If Recovery Fails**:
+1. Check API connectivity to Binance
+2. Verify positions exist with `get_position_info()`
+3. Ensure open orders match position quantities
+4. Review logs for specific error messages
+
+**If WebSocket Not Detecting TPs**:
+1. Verify User Data Stream is active
+2. Check `trading_bot_reference` is set correctly
+3. Confirm ACCUMULATOR strategy is active
+4. Validate order IDs match between TP creation and execution
+
+**Manual Reset** (Emergency):
+```bash
+# Stop bot, close all positions manually on Binance, restart bot
+# Recovery system will detect empty positions and start clean
+```

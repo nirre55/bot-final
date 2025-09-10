@@ -42,6 +42,9 @@ class AccumulatorService:
         self._cached_symbol: Optional[str] = None
         
         self.logger.debug("AccumulatorService initialisé")
+        
+        # Recovery automatique de l'état existant au démarrage
+        self._recover_existing_state()
     
     def set_trading_service_reference(self, trading_service) -> None:
         """
@@ -372,6 +375,43 @@ class AccumulatorService:
             self.logger.error(f"Erreur lors de la vérification TP accumulator: {e}", exc_info=True)
             return None
     
+    def handle_order_execution_from_websocket(self, order_data: Dict[str, Any]) -> None:
+        """
+        Traite les ordres TP exécutés depuis le WebSocket
+        
+        Args:
+            order_data: Données de l'ordre depuis WebSocket
+        """
+        self.logger.debug("handle_order_execution_from_websocket called")
+        
+        try:
+            order_id = str(order_data.get("i", ""))  # Order ID dans structure WebSocket
+            status = order_data.get("X", "")         # Order Status
+            side = order_data.get("S", "")           # Side
+            
+            if status == "FILLED":
+                # Vérifier si c'est un de nos TPs LONG
+                if (self.active_tp_long and 
+                    str(self.active_tp_long.get("orderId", "")) == order_id):
+                    
+                    self.logger.info(f"🎯 TP LONG exécuté détecté via WebSocket - ID: {order_id}")
+                    self._reset_accumulation_side(AccumulatorSide.LONG)
+                    return
+                
+                # Vérifier si c'est un de nos TPs SHORT  
+                if (self.active_tp_short and 
+                    str(self.active_tp_short.get("orderId", "")) == order_id):
+                    
+                    self.logger.info(f"🎯 TP SHORT exécuté détecté via WebSocket - ID: {order_id}")
+                    self._reset_accumulation_side(AccumulatorSide.SHORT)
+                    return
+                    
+                # Si ce n'est pas un de nos TPs, on ignore
+                self.logger.debug(f"Ordre {order_id} non suivi par AccumulatorService")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur WebSocket AccumulatorService: {e}", exc_info=True)
+    
     def _reset_accumulation_side(self, side: AccumulatorSide) -> None:
         """
         Reset l'accumulation pour un côté spécifique
@@ -479,6 +519,142 @@ class AccumulatorService:
             self.logger.info(f"Cache formatage Accumulator: tick_size={tick_size}, step_size={step_size}")
         else:
             self.logger.warning("Impossible de mettre en cache les informations de précision")
+    
+    def _recover_existing_state(self) -> None:
+        """
+        Récupère automatiquement l'état des accumulations existantes depuis Binance
+        Restaure les positions, TPs actifs et estime les compteurs d'accumulation
+        """
+        self.logger.info("🔄 Démarrage recovery automatique AccumulatorService...")
+        
+        try:
+            # 1. Récupérer les positions existantes
+            positions_info = self.binance_client.get_position_info(config.SYMBOL)
+            if not positions_info:
+                self.logger.info("Aucune position existante - Démarrage propre")
+                return
+            
+            # 2. Récupérer les ordres ouverts (potentiels TPs)
+            open_orders = self.binance_client.get_open_orders(config.SYMBOL)
+            
+            # 3. Analyser les positions et restaurer l'état
+            for position in positions_info:
+                position_side = position.get("positionSide", "")
+                position_amt = float(position.get("positionAmt", "0"))
+                entry_price = float(position.get("entryPrice", "0"))
+                
+                if abs(position_amt) > 0 and entry_price > 0:  # Position active
+                    self._restore_position_state(position_side, position_amt, entry_price, open_orders)
+            
+            # 4. Logger l'état récupéré
+            self._log_recovery_status()
+            self.logger.info("✅ Recovery automatique terminé")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Erreur lors du recovery automatique: {e}", exc_info=True)
+            self.logger.warning("Démarrage sans recovery - État initial vide")
+    
+    def _restore_position_state(
+        self, 
+        position_side: str, 
+        position_amt: float, 
+        entry_price: float, 
+        open_orders: list
+    ) -> None:
+        """
+        Restaure l'état pour une position spécifique
+        
+        Args:
+            position_side: "LONG" ou "SHORT"
+            position_amt: Quantité de position (+ pour LONG, - pour SHORT)
+            entry_price: Prix moyen d'entrée
+            open_orders: Liste des ordres ouverts
+        """
+        self.logger.debug(f"_restore_position_state: {position_side} {position_amt} @ {entry_price}")
+        
+        try:
+            abs_qty = abs(position_amt)
+            
+            if position_side == "LONG" and position_amt > 0:
+                # Restaurer position LONG
+                self.current_long_quantity = abs_qty
+                
+                # Estimer le nombre d'accumulations basé sur la quantité minimum
+                min_qty = 0.001  # Quantité minimale par ordre (depuis config TRADING)
+                estimated_count = max(1, int(abs_qty / min_qty))
+                self.long_accumulation_count = min(estimated_count, config.ACCUMULATOR_CONFIG.get("MAX_ACCUMULATIONS", 10))
+                
+                # Chercher le TP LONG correspondant
+                self.active_tp_long = self._find_corresponding_tp("LONG", abs_qty, open_orders)
+                
+                self.logger.info(f"🔄 Position LONG restaurée: {abs_qty} BTC, {self.long_accumulation_count} accumulations")
+                
+            elif position_side == "SHORT" and position_amt < 0:
+                # Restaurer position SHORT  
+                self.current_short_quantity = abs_qty
+                
+                # Estimer le nombre d'accumulations
+                min_qty = 0.001
+                estimated_count = max(1, int(abs_qty / min_qty))
+                self.short_accumulation_count = min(estimated_count, config.ACCUMULATOR_CONFIG.get("MAX_ACCUMULATIONS", 10))
+                
+                # Chercher le TP SHORT correspondant
+                self.active_tp_short = self._find_corresponding_tp("SHORT", abs_qty, open_orders)
+                
+                self.logger.info(f"🔄 Position SHORT restaurée: {abs_qty} BTC, {self.short_accumulation_count} accumulations")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur restauration position {position_side}: {e}", exc_info=True)
+    
+    def _find_corresponding_tp(self, side: str, quantity: float, open_orders: list) -> Optional[Dict[str, Any]]:
+        """
+        Trouve l'ordre TP correspondant à une position
+        
+        Args:
+            side: "LONG" ou "SHORT"  
+            quantity: Quantité de la position
+            open_orders: Liste des ordres ouverts
+            
+        Returns:
+            Informations du TP trouvé ou None
+        """
+        try:
+            expected_order_side = "SELL" if side == "LONG" else "BUY"
+            expected_position_side = side
+            
+            for order in open_orders:
+                if (order.get("type") == "TAKE_PROFIT" and
+                    order.get("side") == expected_order_side and
+                    order.get("positionSide") == expected_position_side):
+                    
+                    order_qty = float(order.get("origQty", "0"))
+                    
+                    # Vérifier si la quantité correspond (avec petite tolérance)
+                    if abs(order_qty - quantity) < 0.0001:
+                        self.logger.info(f"✅ TP {side} trouvé: ID {order.get('orderId')} pour {order_qty} BTC")
+                        return {
+                            "orderId": order.get("orderId"),
+                            "symbol": order.get("symbol"),
+                            "side": order.get("side"),
+                            "origQty": order_qty,
+                            "price": order.get("price"),
+                            "stopPrice": order.get("stopPrice")
+                        }
+            
+            self.logger.warning(f"⚠️ Aucun TP {side} trouvé pour quantité {quantity}")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Erreur recherche TP {side}: {e}", exc_info=True)
+            return None
+    
+    def _log_recovery_status(self) -> None:
+        """Log le statut après recovery"""
+        self.logger.info("📊 État après recovery:")
+        self.logger.info(f"   LONG: {self.long_accumulation_count} accumulations, {self.current_long_quantity} BTC")
+        self.logger.info(f"   SHORT: {self.short_accumulation_count} accumulations, {self.current_short_quantity} BTC") 
+        self.logger.info(f"   TP LONG: {'✅' if self.active_tp_long else '❌'}")
+        self.logger.info(f"   TP SHORT: {'✅' if self.active_tp_short else '❌'}")
     
     def _format_price(self, price: float) -> str:
         """

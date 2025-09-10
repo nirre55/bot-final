@@ -91,6 +91,8 @@ class BinanceTradingBot:
     def _init_user_data_manager(self) -> None:
         """Initialise le gestionnaire User Data Stream pour les exécutions d'ordres"""
         self.user_data_manager = UserDataStreamManager(self._handle_order_execution)
+        # Définir la référence au trading bot pour accéder au strategy manager
+        self.user_data_manager.set_trading_bot_reference(self)
     
     def _preload_symbol_information(self) -> None:
         """Précharge les informations du symbole de trading au démarrage"""

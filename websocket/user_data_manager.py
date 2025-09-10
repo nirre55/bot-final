@@ -27,6 +27,9 @@ class UserDataStreamManager:
         self.binance_client = BinanceAPIClient()
         self.order_execution_handler = order_execution_handler
         
+        # Référence au trading bot pour accéder au strategy manager
+        self.trading_bot = None
+        
         # État du stream
         self.listen_key: Optional[str] = None
         self.websocket_connection = None
@@ -37,6 +40,16 @@ class UserDataStreamManager:
         self.reconnect_delay: int = 5
         
         self.logger.debug("UserDataStreamManager initialisé")
+    
+    def set_trading_bot_reference(self, trading_bot) -> None:
+        """
+        Définit la référence au trading bot pour accéder au strategy manager
+        
+        Args:
+            trading_bot: Instance du trading bot
+        """
+        self.trading_bot = trading_bot
+        self.logger.debug("Référence trading bot définie")
     
     async def start(self) -> None:
         """Démarre le User Data Stream"""
@@ -250,6 +263,19 @@ class UserDataStreamManager:
                 # Appeler le handler si défini (directement dans la boucle d'événements)
                 if self.order_execution_handler:
                     self.order_execution_handler(execution_data)
+                
+                # NOUVEAU : Envoyer aussi à AccumulatorService si stratégie ACCUMULATOR active
+                if (self.trading_bot and 
+                    hasattr(self.trading_bot, 'strategy_manager') and 
+                    self.trading_bot.strategy_manager.current_strategy_type == "ACCUMULATOR"):
+                    
+                    try:
+                        accumulator_service = self.trading_bot.strategy_manager.current_strategy.accumulator_service
+                        accumulator_service.handle_order_execution_from_websocket(execution_data)
+                    except AttributeError:
+                        self.logger.debug("AccumulatorService non accessible depuis la stratégie courante")
+                    except Exception as acc_error:
+                        self.logger.error(f"Erreur envoi à AccumulatorService: {acc_error}")
                     
         except Exception as e:
             self.logger.error(f"Erreur lors du traitement ORDER_TRADE_UPDATE: {e}", exc_info=True)
