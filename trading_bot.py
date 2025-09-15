@@ -343,33 +343,80 @@ class BinanceTradingBot:
         balance_data = self.binance_client.get_account_balance()
         self.display.display_balance(balance_data)
     
+    async def _cleanup_resources(self) -> None:
+        """Nettoie toutes les ressources du bot avant arrêt"""
+        self.logger.info("🧹 Début du nettoyage des ressources...")
+        
+        try:
+            # 1. Arrêter les WebSocket managers
+            if hasattr(self, 'websocket_manager'):
+                self.logger.info("Arrêt du WebSocket manager...")
+                self.websocket_manager.stop()
+            
+            if hasattr(self, 'user_data_manager'):
+                self.logger.info("Arrêt du User Data manager...")
+                await self.user_data_manager.stop()
+            
+            # 2. Nettoyer le listen key côté Binance
+            if (hasattr(self, 'user_data_manager') and 
+                hasattr(self.user_data_manager, 'listen_key') and 
+                self.user_data_manager.listen_key):
+                try:
+                    self.logger.info("Nettoyage du listen key Binance...")
+                    self.binance_client.close_listen_key(self.user_data_manager.listen_key)
+                except Exception as e:
+                    self.logger.warning(f"Erreur nettoyage listen key: {e}")
+            
+            # 3. Nettoyer le manager de stratégies
+            if hasattr(self, 'strategy_manager'):
+                self.logger.info("Nettoyage du strategy manager...")
+                self.strategy_manager.cleanup()
+            
+            # 4. Attendre que les tâches se terminent
+            self.logger.info("Attente fin des tâches en cours...")
+            await asyncio.sleep(0.5)  # Laisser le temps aux connexions de se fermer
+            
+            self.logger.info("✅ Nettoyage des ressources terminé")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors du nettoyage: {e}", exc_info=True)
+    
     def _setup_signal_handlers(self) -> None:
         """Configure les gestionnaires de signaux pour un arrêt propre"""
         def signal_handler(signum: int, frame: Any) -> None:
             self.logger.info(f"Signal {signum} reçu - arrêt demandé")
             self.shutdown_requested = True
-            
-            # Arrêter les deux WebSocket managers
-            self.websocket_manager.stop()
-            
-            # Pour le User Data Stream, déclencher l'arrêt
-            if hasattr(self, 'user_data_manager'):
-                # Créer une tâche pour l'arrêt async du user data manager
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.create_task(self.user_data_manager.stop())
-                except Exception as e:
-                    self.logger.warning(f"Erreur arrêt user data manager: {e}")
-                    self.user_data_manager.is_running = False
-                
-            print("\n[SIGNAL] Arrêt en cours...")
-            
-            # Sur Windows, forcer l'arrêt après plusieurs signaux
             self._signal_count += 1
             
-            if self._signal_count >= 3:
-                print("\n[FORCE] Arrêt forcé après 3 signaux")
+            print(f"\n[SIGNAL] Arrêt demandé ({self._signal_count}/3)...")
+            
+            # Premier signal: arrêt propre
+            if self._signal_count == 1:
+                try:
+                    # Programmer le nettoyage des ressources
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(self._cleanup_resources())
+                    else:
+                        # Si pas de loop en cours, forcer l'arrêt des WebSockets
+                        if hasattr(self, 'websocket_manager'):
+                            self.websocket_manager.stop()
+                        if hasattr(self, 'user_data_manager'):
+                            self.user_data_manager.is_running = False
+                except Exception as e:
+                    self.logger.warning(f"Erreur lors du nettoyage: {e}")
+                    
+            # Deuxième signal: arrêt plus agressif
+            elif self._signal_count == 2:
+                print("\n[SIGNAL] Arrêt forcé des WebSockets...")
+                if hasattr(self, 'websocket_manager'):
+                    self.websocket_manager.stop()
+                if hasattr(self, 'user_data_manager'):
+                    self.user_data_manager.is_running = False
+                    
+            # Troisième signal: arrêt brutal
+            else:
+                print("\n[FORCE] Arrêt brutal du processus...")
                 import os
                 os._exit(1)
         
@@ -431,29 +478,54 @@ class BinanceTradingBot:
             self.logger.error(f"Erreur lors de l'exécution du bot: {e}", exc_info=True)
             print(f"\nErreur lors de l'exécution du bot: {e}")
         finally:
-            # Arrêt propre des WebSocket managers et stratégies
+            # Nettoyage final et fermeture du bot
             self.logger.info("Nettoyage final et fermeture du bot")
-            self.websocket_manager.stop()
-            await self.user_data_manager.stop()
-            
-            # Nettoyer le manager de stratégies
-            if hasattr(self, 'strategy_manager'):
-                self.strategy_manager.cleanup()
-            
-            # Attendre un moment pour que les connexions se ferment proprement
-            await asyncio.sleep(1)
-            self.display.display_shutdown_info()
+            try:
+                # Utiliser notre méthode de nettoyage centralisée
+                await self._cleanup_resources()
+                self.display.display_shutdown_info()
+            except Exception as cleanup_error:
+                self.logger.error(f"Erreur lors du nettoyage final: {cleanup_error}", exc_info=True)
+                print(f"[ERREUR] Problème lors du nettoyage: {cleanup_error}")
+                # Forcer l'arrêt si le nettoyage échoue
+                import os
+                os._exit(1)
 
 
 def main() -> None:
-    """Point d'entrée principal"""
+    """Point d'entrée principal avec timeout d'arrêt"""
     try:
         bot = BinanceTradingBot()
-        asyncio.run(bot.run_bot())
+        
+        # Lancer le bot avec timeout d'arrêt
+        try:
+            asyncio.run(bot.run_bot())
+        except KeyboardInterrupt:
+            print("\n[ARRET] Arrêt demandé par l'utilisateur...")
+            
+            # Timeout d'arrêt gracieux: 10 secondes
+            print("[ARRET] Nettoyage en cours (timeout: 10s)...")
+            try:
+                # Essayer un arrêt gracieux avec timeout
+                asyncio.run(asyncio.wait_for(bot._cleanup_resources(), timeout=10.0))
+                print("[ARRET] ✅ Arrêt gracieux terminé")
+            except asyncio.TimeoutError:
+                print("[ARRET] ⚠️ Timeout - Arrêt forcé")
+                import os
+                os._exit(1)
+            except Exception as cleanup_error:
+                print(f"[ARRET] ❌ Erreur lors du nettoyage: {cleanup_error}")
+                import os
+                os._exit(1)
+                
     except KeyboardInterrupt:
-        print("\nBot arrêté.")
+        print("\n[FORCE] Arrêt forcé immédiat")
+        import os
+        os._exit(1)
     except Exception as e:
         print(f"Erreur fatale: {e}")
+        import os
+        os._exit(1)
 
 
 if __name__ == "__main__":

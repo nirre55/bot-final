@@ -67,7 +67,7 @@ STRATEGY_CONFIG: Dict[str, Any] = {
 ACCUMULATOR_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver la stratégie accumulator
     "TP_PERCENT": 0.003,  # Pourcentage TP (0.3% par défaut)
-    "MAX_ACCUMULATIONS": 10,  # Nombre maximum d'accumulations par côté
+    "MAX_ACCUMULATIONS": 15,  # Nombre maximum d'accumulations par côté
     "PRICE_OFFSET": 0.001,  # Offset entre stopPrice et price pour l'ordre limite (0.1%)
 }
 

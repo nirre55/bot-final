@@ -558,12 +558,14 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 
 ## System Status & Recent Changes
 
-### Current Configuration (2025-09-08)
+### Current Configuration (2025-09-12 Update)
 - **Active Strategy**: `ACCUMULATOR` (simple accumulation strategy)
 - **TP Percentage**: 0.3% from average position price
-- **Max Accumulations**: 10 positions per side (LONG/SHORT)
+- **Max Accumulations**: 15 positions per side (LONG/SHORT) ⬆️ *Updated from 10*
 - **Symbol**: `BTCUSDC` on 5-minute timeframe
 - **RSI Periods**: 3/5/7 with thresholds 10/20/30 - 90/80/70
+- **Recovery System**: ✅ Automatic TP recovery for missing TPs
+- **Shutdown System**: ✅ Enhanced 3-level graceful shutdown
 
 ### Strategy System Architecture ✅
 ```
@@ -587,6 +589,9 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 5. **WebSocket Integration**: AccumulatorService now receives real-time TP execution events
 6. **Automatic Recovery**: Bot restores ACCUMULATOR state on restart (positions + TPs + counters)
 7. **Pylance Corrections**: Added `get_open_orders()` method to BinanceAPIClient
+8. **Enhanced Shutdown**: Implemented 3-level graceful shutdown system with resource cleanup
+9. **Automatic TP Recovery**: Missing TPs automatically recreated during position recovery
+10. **Process Cleanup**: Zombie process elimination - clean shutdown without manual intervention
 
 ### Take Profit Orders
 Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
@@ -604,7 +609,10 @@ Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
 - ✅ **Error Handling**: Comprehensive logging and error recovery
 - ✅ **WebSocket Detection**: Real-time TP execution detection for ACCUMULATOR
 - ✅ **Automatic Recovery**: State restoration on bot restart
-- ✅ **Production Ready**: Robust architecture for live trading
+- ✅ **Automatic TP Recovery**: Missing TPs automatically recreated during startup
+- ✅ **Enhanced Shutdown**: 3-level graceful shutdown with complete resource cleanup
+- ✅ **Process Management**: Zero zombie processes, clean file unlocking
+- ✅ **Production Ready**: Robust architecture for live trading with improved reliability
 
 ## Advanced Features (2025-09-10 Update)
 
@@ -762,3 +770,67 @@ grep "TP.*executed.*WebSocket" logs/trading_bot.log | tail -5
 # Stop bot, close all positions manually on Binance, restart bot
 # Recovery system will detect empty positions and start clean
 ```
+
+### Enhanced Shutdown System (2025-09-12 Update)
+
+The bot now features a **comprehensive shutdown system** that resolves process cleanup issues:
+
+**Problem Solved**: Previously, Ctrl+C left zombie processes that blocked log file deletion and required manual `taskkill` commands.
+
+**Enhanced Shutdown Features**:
+- ✅ **Graceful 3-level shutdown**: Progressive signals (graceful → forceful → brutal)
+- ✅ **Resource cleanup**: WebSockets, Listen Keys, Strategy Manager automatically cleaned
+- ✅ **Timeout protection**: 10-second timeout prevents hanging shutdowns
+- ✅ **File unlock**: Log files immediately unlocked after bot shutdown
+- ✅ **Zero zombie processes**: No manual process killing required
+
+**Shutdown Process**:
+```
+Ctrl+C (Signal 1) → Graceful cleanup with _cleanup_resources()
+Ctrl+C (Signal 2) → Force WebSocket shutdown
+Ctrl+C (Signal 3) → Brutal process termination (os._exit)
+```
+
+**Centralized Cleanup** (`_cleanup_resources()`):
+1. **WebSocket Shutdown**: Both kline and User Data streams properly closed
+2. **Binance Cleanup**: Listen key closed server-side via `close_listen_key()`
+3. **Strategy Cleanup**: All strategy managers and services cleaned
+4. **Timeout Safety**: 0.5s wait for graceful connection closure
+
+**Benefits**:
+- **User Experience**: Single Ctrl+C properly shuts down the bot
+- **Development**: Log files immediately deletable without manual intervention
+- **Production**: Robust shutdown prevents resource leaks
+- **Reliability**: Timeout prevents infinite hanging on network issues
+
+### Automatic TP Recovery System (2025-09-12 Update)
+
+The ACCUMULATOR strategy now includes **automatic Take Profit recovery** for missing TPs:
+
+**Problem Solved**: Bot restarts with existing positions but missing TPs (manually deleted or expired) previously required manual TP recreation.
+
+**Automatic Recovery Features**:
+- ✅ **Missing TP Detection**: Automatically detects positions without corresponding TPs
+- ✅ **Smart TP Creation**: Calculates TP price based on position average price + configured percentage
+- ✅ **Seamless Integration**: Works within existing recovery system without additional configuration
+- ✅ **WebSocket Ready**: Newly created TPs immediately tracked for execution detection
+
+**Recovery Logic**:
+```python
+# During position recovery
+if position_exists and not tp_found:
+    tp_price = entry_price * (1 ± TP_PERCENT)  # ± based on LONG/SHORT
+    auto_create_tp(side, quantity, tp_price)
+```
+
+**Example Recovery**:
+```
+Position Found: LONG 0.003 BTC @ 115,251.9
+TP Search: ❌ No TP found in open orders
+Auto Recovery: ✅ TP created @ 115,597.6 (0.3% above entry)
+Result: Position fully restored with WebSocket tracking active
+```
+
+**Configuration**: Uses existing `ACCUMULATOR_CONFIG.TP_PERCENT` (default: 0.3%)
+
+**Safety**: Only creates TPs for positions without existing TPs - never duplicates

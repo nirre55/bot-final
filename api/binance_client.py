@@ -180,6 +180,84 @@ class BinanceAPIClient:
             self.logger.error(f"Erreur lors de la récupération du symbole: {e}", exc_info=True)
             return None
     
+    def get_price_precision(self, symbol: str) -> int:
+        """
+        Récupère la précision des prix pour un symbole
+        
+        Args:
+            symbol: Symbole à analyser
+            
+        Returns:
+            Nombre de décimales autorisées pour les prix
+        """
+        symbol_info = self.get_symbol_info(symbol)
+        if symbol_info:
+            # Chercher le filtre PRICE_FILTER
+            for filter_info in symbol_info.get("filters", []):
+                if filter_info.get("filterType") == "PRICE_FILTER":
+                    tick_size = filter_info.get("tickSize", "1")
+                    # Compter les décimales dans tickSize
+                    return len(tick_size.split(".")[1]) if "." in tick_size else 0
+        
+        # Valeur par défaut pour BTCUSDC (2 décimales)
+        self.logger.warning(f"Précision de prix non trouvée pour {symbol}, utilisation de 2 par défaut")
+        return 2
+    
+    def get_quantity_precision(self, symbol: str) -> int:
+        """
+        Récupère la précision des quantités pour un symbole
+        
+        Args:
+            symbol: Symbole à analyser
+            
+        Returns:
+            Nombre de décimales autorisées pour les quantités
+        """
+        symbol_info = self.get_symbol_info(symbol)
+        if symbol_info:
+            # Chercher le filtre LOT_SIZE
+            for filter_info in symbol_info.get("filters", []):
+                if filter_info.get("filterType") == "LOT_SIZE":
+                    step_size = filter_info.get("stepSize", "1")
+                    # Compter les décimales dans stepSize
+                    return len(step_size.split(".")[1]) if "." in step_size else 0
+        
+        # Valeur par défaut pour BTCUSDC (3 décimales)
+        self.logger.warning(f"Précision de quantité non trouvée pour {symbol}, utilisation de 3 par défaut")
+        return 3
+    
+    def format_price(self, price: float, symbol: str) -> str:
+        """
+        Formate un prix selon les règles de précision du symbole
+        
+        Args:
+            price: Prix à formater
+            symbol: Symbole concerné
+            
+        Returns:
+            Prix formaté avec la bonne précision
+        """
+        precision = self.get_price_precision(symbol)
+        formatted_price = f"{price:.{precision}f}"
+        self.logger.debug(f"Prix formaté pour {symbol}: {price} -> {formatted_price}")
+        return formatted_price
+    
+    def format_quantity(self, quantity: float, symbol: str) -> str:
+        """
+        Formate une quantité selon les règles de précision du symbole
+        
+        Args:
+            quantity: Quantité à formater
+            symbol: Symbole concerné
+            
+        Returns:
+            Quantité formatée avec la bonne précision
+        """
+        precision = self.get_quantity_precision(symbol)
+        formatted_quantity = f"{quantity:.{precision}f}"
+        self.logger.debug(f"Quantité formatée pour {symbol}: {quantity} -> {formatted_quantity}")
+        return formatted_quantity
+    
     def place_order(
         self,
         symbol: str,
@@ -201,8 +279,11 @@ class BinanceAPIClient:
         Returns:
             Réponse de l'ordre ou None
         """
+        # Formater la quantité selon les règles du symbole
+        formatted_quantity = self.format_quantity(float(quantity), symbol)
+        
         self.logger.debug(f"place_order called: {symbol} {side} {quantity}")
-        self.logger.info(f"Placement d'ordre {side} {quantity} {symbol}")
+        self.logger.info(f"Placement d'ordre {side} {formatted_quantity} {symbol}")
         
         try:
             endpoint = "/fapi/v1/order"
@@ -212,7 +293,7 @@ class BinanceAPIClient:
                 "symbol": symbol,
                 "side": side,
                 "type": order_type,
-                "quantity": quantity,
+                "quantity": formatted_quantity,
                 "timestamp": timestamp
             }
             
@@ -266,8 +347,12 @@ class BinanceAPIClient:
         Returns:
             Réponse de l'ordre ou None
         """
+        # Formater les prix et quantités selon les règles du symbole
+        formatted_stop_price = self.format_price(float(stop_price), symbol)
+        formatted_quantity = self.format_quantity(float(quantity), symbol)
+        
         self.logger.debug(f"place_stop_market_order called: {symbol} {side} {quantity} @ {stop_price}")
-        self.logger.info(f"Placement ordre STOP_MARKET {side} {quantity} {symbol} @ {stop_price}")
+        self.logger.info(f"Placement ordre STOP_MARKET {side} {formatted_quantity} {symbol} @ {formatted_stop_price}")
         
         try:
             endpoint = "/fapi/v1/order"
@@ -277,8 +362,8 @@ class BinanceAPIClient:
                 "symbol": symbol,
                 "side": side,
                 "type": "STOP_MARKET",
-                "quantity": quantity,
-                "stopPrice": stop_price,
+                "quantity": formatted_quantity,
+                "stopPrice": formatted_stop_price,
                 "positionSide": position_side,
                 "timestamp": timestamp
             }
@@ -422,8 +507,13 @@ class BinanceAPIClient:
         Returns:
             Réponse de l'ordre ou None
         """
+        # Formater les prix selon les règles du symbole
+        formatted_stop_price = self.format_price(float(stop_price), symbol)
+        formatted_price = self.format_price(float(price), symbol)
+        formatted_quantity = self.format_quantity(float(quantity), symbol)
+        
         self.logger.debug(f"place_take_profit_order called: {symbol} {side} {quantity} @ stop:{stop_price} limit:{price}")
-        self.logger.info(f"Placement ordre TAKE_PROFIT {side} {quantity} {symbol} @ {stop_price}/{price}")
+        self.logger.info(f"Placement ordre TAKE_PROFIT {side} {formatted_quantity} {symbol} @ {formatted_stop_price}/{formatted_price}")
         
         try:
             endpoint = "/fapi/v1/order"
@@ -433,9 +523,9 @@ class BinanceAPIClient:
                 "symbol": symbol,
                 "side": side,
                 "type": "TAKE_PROFIT",
-                "quantity": quantity,
-                "stopPrice": stop_price,
-                "price": price,
+                "quantity": formatted_quantity,
+                "stopPrice": formatted_stop_price,
+                "price": formatted_price,
                 "positionSide": position_side,
                 "timestamp": timestamp
             }

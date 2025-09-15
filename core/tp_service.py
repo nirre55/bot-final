@@ -449,14 +449,15 @@ class TPService:
         """Nettoie les ressources du service TP"""
         self.logger.info("Nettoyage du service TP")
         
-        # Annuler les ordres TP actifs si nécessaire
+        # IMPORTANT: Ne pas annuler les ordres TP actifs lors de l'arrêt du bot
+        # Les TPs doivent rester actifs pour fermer les positions existantes
         if self.active_tp_long:
-            self._cancel_tp_order(self.active_tp_long)
+            self.logger.info(f"⚠️ TP LONG préservé lors de l'arrêt: {self.active_tp_long.get('orderId')}")
         
         if self.active_tp_short:
-            self._cancel_tp_order(self.active_tp_short)
+            self.logger.info(f"⚠️ TP SHORT préservé lors de l'arrêt: {self.active_tp_short.get('orderId')}")
         
-        # Reset des variables
+        # Reset des variables SANS annuler les TPs - les TPs restent actifs sur Binance
         self.active_tp_long = None
         self.active_tp_short = None
         self.current_long_quantity = 0.0

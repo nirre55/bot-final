@@ -483,16 +483,42 @@ class AccumulatorService:
         """Nettoie les ressources du service accumulator"""
         self.logger.info("Nettoyage du service AccumulatorService")
         
-        # Annuler les ordres TP actifs si nécessaire
+        # IMPORTANT: Ne pas annuler les ordres TP actifs lors de l'arrêt du bot
+        # Les TPs doivent rester actifs pour fermer les positions existantes
         if self.active_tp_long:
-            self._cancel_tp_order(self.active_tp_long)
+            self.logger.info(f"⚠️ TP LONG préservé lors de l'arrêt: {self.active_tp_long.get('orderId')}")
         
         if self.active_tp_short:
-            self._cancel_tp_order(self.active_tp_short)
+            self.logger.info(f"⚠️ TP SHORT préservé lors de l'arrêt: {self.active_tp_short.get('orderId')}")
         
-        # Reset des variables
-        self._reset_accumulation_side(AccumulatorSide.LONG)
-        self._reset_accumulation_side(AccumulatorSide.SHORT)
+        # Reset des variables SANS annuler les TPs
+        self._reset_accumulation_side_without_tp_cancel(AccumulatorSide.LONG)
+        self._reset_accumulation_side_without_tp_cancel(AccumulatorSide.SHORT)
+    
+    def _reset_accumulation_side_without_tp_cancel(self, side: AccumulatorSide) -> None:
+        """
+        Reset l'accumulation pour un côté spécifique SANS annuler le TP actif
+        Utilisé pendant cleanup() pour préserver les TPs lors de l'arrêt du bot
+        
+        Args:
+            side: Côté à reset
+        """
+        self.logger.info(f"🔄 Reset accumulation {side.value} (TPs préservés)")
+        
+        try:
+            if side == AccumulatorSide.LONG:
+                self.long_accumulation_count = 0
+                # Ne pas réinitialiser active_tp_long pour préserver le TP
+                self.current_long_quantity = 0.0
+            else:
+                self.short_accumulation_count = 0
+                # Ne pas réinitialiser active_tp_short pour préserver le TP
+                self.current_short_quantity = 0.0
+            
+            self.logger.info(f"✅ Accumulation {side.value} réinitialisée (TP préservé)")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur reset accumulation {side.value}: {e}", exc_info=True)
     
     def _cache_symbol_precision(self) -> None:
         """Met en cache les informations de précision pour éviter appels répétés"""
@@ -587,6 +613,11 @@ class AccumulatorService:
                 # Chercher le TP LONG correspondant
                 self.active_tp_long = self._find_corresponding_tp("LONG", abs_qty, open_orders)
                 
+                # Si TP manquant, le créer automatiquement
+                if not self.active_tp_long:
+                    self.logger.warning(f"⚠️ TP LONG manquant pour position de {abs_qty} BTC - Création automatique...")
+                    self.active_tp_long = self._create_recovery_tp("LONG", abs_qty, entry_price)
+                
                 self.logger.info(f"🔄 Position LONG restaurée: {abs_qty} BTC, {self.long_accumulation_count} accumulations")
                 
             elif position_side == "SHORT" and position_amt < 0:
@@ -600,6 +631,11 @@ class AccumulatorService:
                 
                 # Chercher le TP SHORT correspondant
                 self.active_tp_short = self._find_corresponding_tp("SHORT", abs_qty, open_orders)
+                
+                # Si TP manquant, le créer automatiquement
+                if not self.active_tp_short:
+                    self.logger.warning(f"⚠️ TP SHORT manquant pour position de {abs_qty} BTC - Création automatique...")
+                    self.active_tp_short = self._create_recovery_tp("SHORT", abs_qty, entry_price)
                 
                 self.logger.info(f"🔄 Position SHORT restaurée: {abs_qty} BTC, {self.short_accumulation_count} accumulations")
                 
@@ -628,9 +664,13 @@ class AccumulatorService:
                     order.get("positionSide") == expected_position_side):
                     
                     order_qty = float(order.get("origQty", "0"))
+                    qty_diff = abs(order_qty - quantity)
                     
-                    # Vérifier si la quantité correspond (avec petite tolérance)
-                    if abs(order_qty - quantity) < 0.0001:
+                    # Log pour diagnostic
+                    self.logger.debug(f"TP {side} candidat: ID {order.get('orderId')}, qty={order_qty}, diff={qty_diff}")
+                    
+                    # Vérifier si la quantité correspond (tolérance augmentée)
+                    if qty_diff < 0.001:  # Tolérance augmentée de 0.0001 à 0.001
                         self.logger.info(f"✅ TP {side} trouvé: ID {order.get('orderId')} pour {order_qty} BTC")
                         return {
                             "orderId": order.get("orderId"),
@@ -641,11 +681,58 @@ class AccumulatorService:
                             "stopPrice": order.get("stopPrice")
                         }
             
+            # Log diagnostic détaillé
+            tp_orders = [o for o in open_orders if o.get("type") == "TAKE_PROFIT"]
             self.logger.warning(f"⚠️ Aucun TP {side} trouvé pour quantité {quantity}")
+            self.logger.warning(f"   Ordres TP disponibles: {len(tp_orders)}")
+            for order in tp_orders:
+                self.logger.warning(f"   - ID:{order.get('orderId')} {order.get('side')} {order.get('positionSide')} qty:{order.get('origQty')}")
             return None
             
         except Exception as e:
             self.logger.error(f"Erreur recherche TP {side}: {e}", exc_info=True)
+            return None
+    
+    def _create_recovery_tp(self, side: str, quantity: float, entry_price: float) -> Optional[Dict[str, Any]]:
+        """
+        Crée automatiquement un TP manquant lors de la récupération
+        
+        Args:
+            side: "LONG" ou "SHORT"
+            quantity: Quantité de la position
+            entry_price: Prix moyen d'entrée de la position
+            
+        Returns:
+            Informations du TP créé ou None en cas d'erreur
+        """
+        self.logger.debug(f"_create_recovery_tp: {side} {quantity} @ {entry_price}")
+        
+        try:
+            # Calculer le prix TP basé sur le pourcentage configuré
+            tp_percent = config.ACCUMULATOR_CONFIG.get("TP_PERCENT", 0.003)  # 0.3% par défaut
+            
+            if side == "LONG":
+                # Pour LONG: TP au-dessus du prix d'entrée
+                tp_price = entry_price * (1 + tp_percent)
+            else:  # SHORT
+                # Pour SHORT: TP en-dessous du prix d'entrée
+                tp_price = entry_price * (1 - tp_percent)
+            
+            self.logger.info(f"📈 Création TP {side} automatique: {quantity} BTC @ {tp_price:.1f} ({tp_percent*100:.1f}% depuis {entry_price:.1f})")
+            
+            # Convertir le string en enum et utiliser la méthode existante pour placer le TP
+            accumulator_side = AccumulatorSide.LONG if side == "LONG" else AccumulatorSide.SHORT
+            tp_order = self._place_accumulator_tp_order(accumulator_side, quantity, tp_price)
+            
+            if tp_order:
+                self.logger.info(f"✅ TP {side} recovery créé avec succès - ID: {tp_order.get('orderId')}")
+                return tp_order
+            else:
+                self.logger.error(f"❌ Échec création TP {side} recovery")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"❌ Erreur création TP {side} recovery: {e}", exc_info=True)
             return None
     
     def _log_recovery_status(self) -> None:
