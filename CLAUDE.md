@@ -592,6 +592,7 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 8. **Enhanced Shutdown**: Implemented 3-level graceful shutdown system with resource cleanup
 9. **Automatic TP Recovery**: Missing TPs automatically recreated during position recovery
 10. **Process Cleanup**: Zombie process elimination - clean shutdown without manual intervention
+11. **CRITICAL: TP Preservation**: Fixed bot cancelling active TPs during shutdown - TPs now preserved for position closure
 
 ### Take Profit Orders
 Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
@@ -611,6 +612,7 @@ Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
 - ✅ **Automatic Recovery**: State restoration on bot restart
 - ✅ **Automatic TP Recovery**: Missing TPs automatically recreated during startup
 - ✅ **Enhanced Shutdown**: 3-level graceful shutdown with complete resource cleanup
+- ✅ **TP Preservation**: Critical fix - TPs no longer cancelled during shutdown, positions remain protected
 - ✅ **Process Management**: Zero zombie processes, clean file unlocking
 - ✅ **Production Ready**: Robust architecture for live trading with improved reliability
 
@@ -834,3 +836,53 @@ Result: Position fully restored with WebSocket tracking active
 **Configuration**: Uses existing `ACCUMULATOR_CONFIG.TP_PERCENT` (default: 0.3%)
 
 **Safety**: Only creates TPs for positions without existing TPs - never duplicates
+
+### Critical TP Preservation Fix (2025-09-12 Update)
+
+**CRITICAL ISSUE RESOLVED**: Le bot annulait incorrectement les ordres Take Profit lors de l'arrêt, empêchant la fermeture des positions existantes.
+
+**Problem**: *"y'a un probleme lorsque le bot ce fermé il cancel les TP en attente"*
+
+**Root Cause**: Les méthodes `cleanup()` dans `accumulator_service.py` et `tp_service.py` appelaient `_cancel_tp_order()` pour les TPs actifs lors de l'arrêt gracieux du bot.
+
+**Critical Fix Applied**:
+
+**accumulator_service.py:482** - Méthode `cleanup()` modifiée :
+```python
+# AVANT (PROBLÉMATIQUE)
+if self.active_tp_long:
+    self._cancel_tp_order(self.active_tp_long)  # ❌ ANNULE LE TP
+
+# APRÈS (CORRIGÉ) 
+if self.active_tp_long:
+    self.logger.info(f"⚠️ TP LONG préservé lors de l'arrêt: {self.active_tp_long.get('orderId')}")
+```
+
+**tp_service.py:448** - Même correction appliquée pour `tp_service.cleanup()`
+
+**New Method**: `_reset_accumulation_side_without_tp_cancel()` 
+- Réinitialise les compteurs d'accumulation SANS toucher aux TPs actifs
+- Préserve les références TP pour le recovery au redémarrage
+
+**Validation Test Results**:
+```bash
+📊 État avant arrêt:
+   TP LONG actif: True  - ID: 25589003361  
+   TP SHORT actif: True - ID: 25589012359
+
+🛑 Déclenchement de l'arrêt gracieux...
+⚠️ TP LONG préservé lors de l'arrêt: 25589003361  
+⚠️ TP SHORT préservé lors de l'arrêt: 25589012359
+✅ Accumulation LONG réinitialisée (TP préservé)
+✅ Accumulation SHORT réinitialisée (TP préservé)
+```
+
+**Impact Résolu**:
+- ✅ **TPs préservés** : Les ordres restent actifs sur Binance après arrêt du bot
+- ✅ **Positions protégées** : Les positions peuvent être fermées par leurs TPs
+- ✅ **Recovery fonctionnel** : Au redémarrage, le recovery retrouve les TPs automatiquement  
+- ✅ **Production ready** : Système maintenant sûr pour utilisation en production
+
+**Files Modified**:
+- `core/accumulator_service.py` - Méthode cleanup() et nouvelle méthode de reset sans TP cancel
+- `core/tp_service.py` - Méthode cleanup() avec préservation des TPs
