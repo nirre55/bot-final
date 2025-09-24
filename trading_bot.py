@@ -70,6 +70,9 @@ class BinanceTradingBot:
         self.rsi_displayed_for_current_candle: bool = False
         self.shutdown_requested: bool = False
         self._signal_count: int = 0
+
+        # Volume de la bougie fermée pour validation
+        self._current_volume: Optional[float] = None
         
         # Le WebSocket manager sera initialisé avec un handler de messages
         self.websocket_manager: WebSocketManager
@@ -157,7 +160,17 @@ class BinanceTradingBot:
             
             # Calculer et afficher les RSI seulement à la fermeture de bougie
             if is_candle_closed:
-                self.logger.info("Fermeture de bougie détectée - Mise à jour des RSI")
+                # Extraire et stocker le volume de la bougie fermée
+                k = kline_data.get('k', {})
+                self._current_volume = float(k.get('v', '0'))
+
+                # Mettre à jour l'historique des volumes dans le signal service
+                self.signal_service.update_volume_history(self._current_volume)
+
+                # Mettre à jour les données de bougie pour la stratégie AllOrNothing (calcul SL)
+                self._update_strategy_candle_data(k)
+
+                self.logger.info(f"Fermeture de bougie détectée - Volume: {self._current_volume:.2f}")
                 self._calculate_and_display_rsi()
                 # Reset du flag pour la nouvelle bougie qui commence
                 self.rsi_displayed_for_current_candle = False
@@ -181,7 +194,23 @@ class BinanceTradingBot:
             
         except Exception as e:
             self.logger.error(f"Erreur lors de l'affichage des données kline: {e}", exc_info=True)
-    
+
+    def _update_strategy_candle_data(self, kline_data: Dict[str, Any]) -> None:
+        """Met à jour les données de bougie pour les stratégies qui en ont besoin"""
+        self.logger.debug("_update_strategy_candle_data called")
+
+        try:
+            # Vérifier si la stratégie actuelle existe
+            if (hasattr(self.strategy_manager, 'current_strategy') and
+                self.strategy_manager.current_strategy):
+
+                # Passer les données de bougie à la stratégie
+                # Toutes les stratégies ont maintenant cette méthode (optionnelle)
+                self.strategy_manager.current_strategy.update_candle_data(kline_data)
+
+        except Exception as e:
+            self.logger.error(f"Erreur mise à jour données bougie stratégie: {e}", exc_info=True)
+
     def _calculate_and_display_rsi(self) -> None:
         """Calcule et affiche les RSI et la couleur HA"""
         self.logger.debug("_calculate_and_display_rsi called")
@@ -247,8 +276,9 @@ class BinanceTradingBot:
         try:
             # Traiter avec le service de signaux
             signal = self.signal_service.process_market_data(
-                self.cached_rsi_data, 
-                self.cached_ha_data
+                self.cached_rsi_data,
+                self.cached_ha_data,
+                self._current_volume
             )
             
             if signal:

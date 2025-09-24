@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SYMBOL: str = "BTCUSDC"  # Symbole
-TIMEFRAME: str = "5m"  # Timeframe
+SYMBOL: str = "LINKUSDC"  # Symbole
+TIMEFRAME: str = "1m"  # Timeframe
 
 # Configuration API Binance
 BINANCE_API_KEY: Optional[str] = os.getenv("BINANCE_API_KEY")
@@ -32,13 +32,17 @@ SIGNAL_CONFIG: Dict[str, Any] = {
         5: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
         7: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
     },
+    "VOLUME_VALIDATION": {
+        "ENABLED": False,  # Activer/désactiver la validation de volume
+        "LOOKBACK_CANDLES": 14,  # Nombre de bougies pour calcul moyenne volume
+    },
 }
 
 # Configuration des quantités de trading
 TRADING_CONFIG: Dict[str, Any] = {
-    "QUANTITY_MODE": "MINIMUM",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
-    "INITIAL_QUANTITY": 0.002,  # Quantité de départ fixe (mode FIXED)
-    "BALANCE_PERCENTAGE": 0.001,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 0.1%
+    "QUANTITY_MODE": "PERCENTAGE",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
+    "INITIAL_QUANTITY": 1,  # Quantité de départ fixe (mode FIXED)
+    "BALANCE_PERCENTAGE": 0.2,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 20%
     "PROGRESSION_MODE": "STEP",  # "DOUBLE" (actuel) ou "STEP" (incrémentation par pas)
 }
 
@@ -60,7 +64,7 @@ CASCADE_CONFIG: Dict[str, Any] = {
 
 # Configuration des stratégies de trading
 STRATEGY_CONFIG: Dict[str, Any] = {
-    "STRATEGY_TYPE": "ACCUMULATOR",  # "ACCUMULATOR" ou "CASCADE_MASTER"
+    "STRATEGY_TYPE": "ALL_OR_NOTHING",  # "ACCUMULATOR", "CASCADE_MASTER", ou "ALL_OR_NOTHING"
 }
 
 # Configuration stratégie ACCUMULATOR
@@ -68,6 +72,15 @@ ACCUMULATOR_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver la stratégie accumulator
     "TP_PERCENT": 0.003,  # Pourcentage TP (0.3% par défaut)
     "MAX_ACCUMULATIONS": 20,  # Nombre maximum d'accumulations par côté
+    "PRICE_OFFSET": 0.001,  # Offset entre stopPrice et price pour l'ordre limite (0.1%)
+}
+
+# Configuration stratégie ALL_OR_NOTHING
+ALL_OR_NOTHING_CONFIG: Dict[str, Any] = {
+    "ENABLED": True,  # Activer/désactiver la stratégie all or nothing
+    "SL_LOOKBACK_CANDLES": 5,  # Nombre de bougies pour HIGH/LOW du SL
+    "SL_OFFSET_PERCENT": 0.005,  # 0.5% offset pour SL
+    "TP_PERCENT": 0.003,  # 0.3% TP fixe du prix d'entrée
     "PRICE_OFFSET": 0.001,  # Offset entre stopPrice et price pour l'ordre limite (0.1%)
 }
 

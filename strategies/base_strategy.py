@@ -13,6 +13,7 @@ class StrategyType(Enum):
     """Types de stratégies disponibles"""
     ACCUMULATOR = "ACCUMULATOR"
     CASCADE_MASTER = "CASCADE_MASTER"
+    ALL_OR_NOTHING = "ALL_OR_NOTHING"
 
 
 class BaseStrategy(ABC):
@@ -96,6 +97,21 @@ class BaseStrategy(ABC):
         """
         Nettoie les ressources de la stratégie
         """
+        pass
+
+    def update_candle_data(self, candle_data: Dict[str, Any]) -> None:
+        """
+        Met à jour les données de bougie pour la stratégie (optionnel)
+
+        Args:
+            candle_data: Données de la bougie fermée
+
+        Note:
+            Méthode optionnelle - implémentation par défaut ne fait rien
+            Les stratégies qui ont besoin des données de bougies peuvent override cette méthode
+        """
+        # Implémentation par défaut - ne fait rien
+        # Les stratégies comme ALL_OR_NOTHING peuvent override cette méthode
         pass
     
     def log_strategy_info(self) -> None:

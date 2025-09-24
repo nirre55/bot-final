@@ -21,10 +21,10 @@ The bot follows a **layered architecture** where each component has a single res
 ### Key Integration Pattern
 The bot triggers calculations **only on candle close events** detected through WebSocket kline streams:
 1. WebSocket receives kline data → `_handle_kline_message()`
-2. On candle close → `_calculate_and_display_rsi()` 
+2. On candle close → Extract volume and update volume history → `_calculate_and_display_rsi()`
 3. RSI calculation → `_calculate_and_display_ha()`
 4. Display both RSI values and HA candle color with emojis
-5. Process signal detection → `_process_signal_detection()`
+5. Process signal detection with volume validation → `_process_signal_detection()`
 6. Execute trade via strategy manager → `StrategyManager.execute_signal()`
 7. Strategy-specific execution:
    - **CASCADE_MASTER**: Full trading system (hedge + cascade + TP)
@@ -49,6 +49,7 @@ python trading_bot.py
 ### Configuration
 - **Trading parameters**: Modify `config.py` (symbol, timeframe, RSI thresholds)
 - **RSI calculation mode**: Set `RSI_ON_HA` in `SIGNAL_CONFIG` (True for HA-based RSI, False for normal RSI)
+- **Volume validation**: Configure `VOLUME_VALIDATION` in `SIGNAL_CONFIG` (enable/disable + lookback candles)
 - **Quantity system**: Configure `TRADING_CONFIG` with dual parameters (quantity mode + progression mode)
 - **Logging levels**: Adjust `LOGGING_CONFIG` in `config.py`
 - **Reconnection settings**: Configure `RECONNECTION_CONFIG` for WebSocket resilience
@@ -67,9 +68,33 @@ The bot calculates **multiple RSI periods** with different sensitivity threshold
 - **Normal RSI** (`RSI_ON_HA: False`): RSI calculated on regular candle close prices
 - **Heikin Ashi RSI** (`RSI_ON_HA: True`): RSI calculated on Heikin Ashi close prices for smoother signals
 
+### Volume Validation Configuration
+The bot includes **optional volume validation** to filter signals based on trading volume:
+
+**Volume Logic**:
+- **Validation Check**: Confirmation candle volume must exceed average volume of previous candles
+- **Real Volume Data**: Uses actual kline volume data (not calculated values)
+- **Automatic History**: Maintains rolling window of volume data for comparison
+- **Fallback Behavior**: Allows signals if insufficient volume history available
+
+**Configuration** (`SIGNAL_CONFIG.VOLUME_VALIDATION`):
+```python
+"VOLUME_VALIDATION": {
+    "ENABLED": True,          # Enable/disable volume validation
+    "LOOKBACK_CANDLES": 14,   # Number of previous candles for average calculation
+}
+```
+
+**Volume Workflow**:
+1. **History Update**: Each closed candle volume added to rolling history
+2. **Validation Trigger**: During HA confirmation step, current volume compared to average
+3. **Signal Impact**: Volume below average → Signal rejected, above average → Signal proceeds
+4. **Logging**: Detailed volume comparison logged for monitoring
+
 ### Data Requirements
 - **RSI calculations**: Requires 100 historical candles minimum
 - **Heikin Ashi calculations**: Requires 50 historical candles
+- **Volume validation**: Requires configurable lookback candles for average calculation (default: 14)
 - **WebSocket stream**: `{symbol}@kline_{timeframe}` format
 - **Hedging analysis**: Configurable lookback candles for high/low detection
 
@@ -99,7 +124,7 @@ Comprehensive logging with file rotation:
 
 ## Trading Strategies
 
-The bot implements **two distinct trading strategies** with automatic switching via configuration:
+The bot implements **three distinct trading strategies** with automatic switching via configuration:
 
 ### Strategy Selection
 ```python
@@ -112,6 +137,7 @@ STRATEGY_CONFIG = {
 **Available Strategies**:
 - `"CASCADE_MASTER"` - Advanced strategy with hedge + cascade + dynamic TP
 - `"ACCUMULATOR"` - Simple strategy with position accumulation + fixed TP
+- `"ALL_OR_NOTHING"` - Risk management strategy with automatic Stop Loss + fixed TP
 
 **Strategy Switching**: Change `STRATEGY_TYPE` in config and restart the bot.
 
@@ -151,16 +177,83 @@ STRATEGY_CONFIG = {
 ```python
 ACCUMULATOR_CONFIG = {
     "ENABLED": True,
-    "TP_PERCENT": 0.003,       # 0.3% TP from average price (updated)
-    "MAX_ACCUMULATIONS": 10,   # Max positions per side
+    "TP_PERCENT": 0.003,       # 0.3% TP from average price
+    "MAX_ACCUMULATIONS": 20,   # Max positions per side (updated from 10)
     "PRICE_OFFSET": 0.001,     # 0.1% trigger offset
 }
 ```
 
+### ALL_OR_NOTHING Strategy (Risk Management)
+**Risk-controlled strategy** with automatic Stop Loss and fixed Take Profit:
+
+**Workflow**:
+1. **Signal detected** → Check existing positions for same side
+2. **Position validation** → If no existing position for this side, proceed
+3. **Market order execution** → Entry at market price
+4. **Stop Loss creation** → Automatic SL with retry mechanism (5 attempts max)
+5. **Take Profit creation** → Fixed TP with retry mechanism (5 attempts max)
+6. **WebSocket monitoring** → Real-time SL/TP execution detection
+7. **Cross-cancellation** → When SL/TP touched, cancel corresponding order
+8. **Position reset** → Ready for new signals after SL/TP execution
+
+**Features**:
+- ❌ **No hedge orders** (uses SL for risk management)
+- ❌ **No cascade system** (single position per side)
+- ✅ **Single position per side** (max 1 LONG + 1 SHORT simultaneously)
+- ✅ **Position blocking** (ignore signals if same side position exists)
+- ✅ **Automatic Stop Loss** based on market structure with distance-based risk calculation
+- ✅ **Fixed Take Profit** percentage from entry
+- ✅ **Cross-cancellation** SL↔TP when either is executed
+- ✅ **Retry mechanism** for order creation failures (5 attempts)
+- ✅ **Real-time monitoring** via User Data Stream
+
+**Stop Loss Logic**:
+- **LONG SL**: LOW minimum of last 5 candles - 0.5% offset (updated from 0.1%)
+- **SHORT SL**: HIGH maximum of last 5 candles + 0.5% offset (updated from 0.1%)
+- **Automatic calculation**: Uses actual candle HIGH/LOW data
+- **Market-based**: SL levels follow natural support/resistance
+
+**Take Profit Logic**:
+- **LONG TP**: Entry price + 0.3% (updated from 0.5%)
+- **SHORT TP**: Entry price - 0.3% (updated from 0.5%)
+- **Fixed percentage**: Consistent profit target regardless of market conditions
+
+**Configuration**:
+```python
+ALL_OR_NOTHING_CONFIG = {
+    "ENABLED": True,
+    "SL_LOOKBACK_CANDLES": 5,    # Candles for HIGH/LOW analysis
+    "SL_OFFSET_PERCENT": 0.005,  # 0.5% SL offset from HIGH/LOW (updated from 0.1%)
+    "TP_PERCENT": 0.003,         # 0.3% TP from entry price (updated from 0.5%)
+    "PRICE_OFFSET": 0.001,       # 0.1% trigger offset for orders
+}
+```
+
+**Cross-Cancellation Logic**:
+- **When SL executed**: Automatically cancel corresponding TP order for same side
+- **When TP executed**: Automatically cancel corresponding SL order for same side
+- **Independent sides**: LONG and SHORT positions managed separately
+- **Examples**:
+  - SL LONG touched → Cancel TP LONG (SHORT position/orders unaffected)
+  - TP SHORT touched → Cancel SL SHORT (LONG position/orders unaffected)
+
+**Position Management**:
+- **Single position limit**: Maximum 1 position per side (1 LONG + 1 SHORT max)
+- **Signal blocking**: New signals ignored if position already exists for same side
+- **Position reset**: After SL/TP execution, ready to accept new signals for that side
+- **Order creation retry**: Up to 5 attempts for SL and TP creation, system stops if all fail
+
+**Risk Profile**:
+- **Conservative**: Fixed risk/reward ratio with known maximum loss
+- **Predictable**: Distance-based risk calculation to SL level
+- **Market-aware**: SL placement follows natural support/resistance levels
+- **Efficient**: Single entry/exit per signal with automatic cross-cancellation
+- **Risk-controlled**: Percentage-based position sizing to SL distance
+
 ## Trading Signal System
 
-### 2-Step Sequential Signal Logic
-The bot implements a **sequential signal detection system** requiring two distinct phases:
+### 3-Step Sequential Signal Logic
+The bot implements a **sequential signal detection system** requiring three distinct validations:
 
 **Step 1: RSI Condition**
 - **LONG Signal**: All 3 RSI periods (3, 5, 7) must be **OVERSOLD** simultaneously
@@ -170,6 +263,11 @@ The bot implements a **sequential signal detection system** requiring two distin
 **Step 2: HA Confirmation** (after RSI condition is met)
 - **LONG Confirmation**: Green HA candle after RSI oversold
 - **SHORT Confirmation**: Red HA candle after RSI overbought
+
+**Step 3: Volume Validation** (during HA confirmation)
+- **Volume Check**: Confirmation candle volume must be **greater than** average volume of last X candles (default: 14)
+- **Real Volume**: Uses actual candle volume data, not Heikin Ashi volume
+- **Configurable**: Can be enabled/disabled and lookback period adjustable
 
 ### Signal State Machine
 - **WAITING**: Monitoring for RSI conditions
@@ -359,7 +457,7 @@ TRADING_CONFIG: Dict[str, Any] = {
 ```python
 TRADING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MODE": "FIXED",  # Use custom fixed quantity
-    "INITIAL_QUANTITY": 0.002,  # Your desired starting quantity
+    "INITIAL_QUANTITY": 1,  # Your desired starting quantity (updated to 1)
     "BALANCE_PERCENTAGE": 0.01,  # Ignored in this mode
     "PROGRESSION_MODE": "STEP",  # How cascade progresses
 }
@@ -371,31 +469,44 @@ TRADING_CONFIG: Dict[str, Any] = {
 #### Percentage-Based Quantity Mode (Advanced Risk Management)
 ```python
 TRADING_CONFIG: Dict[str, Any] = {
-    "QUANTITY_MODE": "PERCENTAGE",  # Risk percentage of balance
-    "INITIAL_QUANTITY": 0.002,  # Ignored in this mode
-    "BALANCE_PERCENTAGE": 0.01,  # 1% of balance at risk
+    "QUANTITY_MODE": "PERCENTAGE",  # Risk percentage of balance (CURRENT CONFIG)
+    "INITIAL_QUANTITY": 1,  # Ignored in this mode
+    "BALANCE_PERCENTAGE": 0.2,  # 20% of balance at risk (CURRENT: updated from 1%)
     "PROGRESSION_MODE": "STEP",  # How cascade progresses
 }
 ```
 - **Advanced risk management**: Calculates quantity based on percentage of available balance
-- **Dynamic balance detection**: Automatically uses the correct quote asset (USDC for BTCUSDC, USDT for ETHUSDT, etc.)
-- **Formula**: `Quantity = (Balance × Percentage) ÷ |Signal_Price - Hedge_Price|`
-- **Risk control**: You risk exactly the specified percentage on the price difference between signal and hedge
+- **Dynamic balance detection**: Automatically uses the correct quote asset (USDC for LINKUSDC, USDT for ETHUSDT, etc.)
+- **Formula**: `Quantity = (Balance × Percentage) ÷ Distance_to_SL_with_offset`
+- **Risk control**: You risk exactly the specified percentage on the distance to Stop Loss level
 - **Fallback safety**: If balance is insufficient or unavailable, automatically falls back to minimum quantity
 
-**Price Difference Calculation**:
-- **Signal LONG**: Hedge price = LOW minimum of last 5 candles (support level)
-- **Signal SHORT**: Hedge price = HIGH maximum of last 5 candles (resistance level)
-- **Logic**: Risk is calculated on the distance to the natural stop-loss level
+**Price Distance Calculation** (ALL_OR_NOTHING Strategy):
+- **LONG Signal**: `Distance = Signal_Price - (SL_Level - SL_Offset)`
+- **SHORT Signal**: `Distance = (SL_Level + SL_Offset) - Signal_Price`
+- **SL Level LONG**: LOW minimum of last 5 candles (support level)
+- **SL Level SHORT**: HIGH maximum of last 5 candles (resistance level)
 
-**Example Calculation**:
+**Example Calculation LONG** (Current LINKUSDC Config):
 ```
 Balance USDC: 100.0
-Risk Percentage: 1.0% = 1.0 USDC at risk
-Signal Price: 110,860.0 USDC
-Hedge Price: 110,790.0 USDC (resistance for SHORT signal)
-Price Difference: 70.0 USDC
-Calculated Quantity: 1.0 ÷ 70.0 = 0.0143 BTC
+Risk Percentage: 20.0% = 20.0 USDC at risk
+Signal Price: 24.50 USDC
+SL Level: 24.30 USDC (LOW of last 5 candles)
+SL with Offset: 24.30 - (24.30 × 0.005) = 24.1785 USDC
+Distance: 24.50 - 24.1785 = 0.3215 USDC
+Calculated Quantity: 20.0 ÷ 0.3215 = 62.2 LINK
+```
+
+**Example Calculation SHORT** (Current LINKUSDC Config):
+```
+Balance USDC: 100.0
+Risk Percentage: 20.0% = 20.0 USDC at risk
+Signal Price: 24.50 USDC
+SL Level: 24.70 USDC (HIGH of last 5 candles)
+SL with Offset: 24.70 + (24.70 × 0.005) = 24.8235 USDC
+Distance: 24.8235 - 24.50 = 0.3235 USDC
+Calculated Quantity: 20.0 ÷ 0.3235 = 61.8 LINK
 ```
 
 ### Cascade Progression Modes
@@ -412,13 +523,13 @@ Calculated Quantity: 1.0 ÷ 70.0 = 0.0143 BTC
 - **Advantages**: Rapid position scaling, higher profit potential
 - **Risk**: Exponential capital requirement
 
-**Example DOUBLE progression**:
+**Example DOUBLE progression** (LINKUSDC):
 ```
-Signal LONG: 0.01 BTC
-Hedge SHORT: 0.02 BTC (2x signal)
-Cascade LONG: 0.03 BTC (to reach net 0.04 LONG vs 0.02 SHORT)
-Cascade SHORT: 0.06 BTC (to reach net 0.08 SHORT vs 0.04 LONG)
-Cascade LONG: 0.12 BTC (to reach net 0.16 LONG vs 0.08 SHORT)
+Signal LONG: 10 LINK
+Hedge SHORT: 20 LINK (2x signal)
+Cascade LONG: 30 LINK (to reach net 40 LONG vs 20 SHORT)
+Cascade SHORT: 60 LINK (to reach net 80 SHORT vs 40 LONG)
+Cascade LONG: 120 LINK (to reach net 160 LONG vs 80 SHORT)
 ```
 
 #### Step Progression (Linear Growth)
@@ -432,13 +543,13 @@ Cascade LONG: 0.12 BTC (to reach net 0.16 LONG vs 0.08 SHORT)
 - **Advantages**: Controlled risk, predictable capital requirement
 - **Risk**: Slower position scaling
 
-**Example STEP progression**:
+**Example STEP progression** (LINKUSDC):
 ```
-Signal LONG: 0.01 BTC (step = 0.01)
-Hedge SHORT: 0.02 BTC
-Cascade LONG: 0.01 BTC (to reach net 0.02 LONG vs 0.02 SHORT) 
-Cascade SHORT: 0.01 BTC (to reach net 0.02 SHORT vs 0.03 LONG)
-Cascade LONG: 0.01 BTC (to reach net 0.04 LONG vs 0.03 SHORT)
+Signal LONG: 10 LINK (step = 10)
+Hedge SHORT: 20 LINK
+Cascade LONG: 10 LINK (to reach net 20 LONG vs 20 SHORT)
+Cascade SHORT: 10 LINK (to reach net 30 SHORT vs 30 LONG)
+Cascade LONG: 10 LINK (to reach net 40 LONG vs 30 SHORT)
 ```
 
 ### Configuration Combinations
@@ -558,11 +669,14 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 
 ## System Status & Recent Changes
 
-### Current Configuration (2025-09-12 Update)
-- **Active Strategy**: `ACCUMULATOR` (simple accumulation strategy)
-- **TP Percentage**: 0.3% from average position price
-- **Max Accumulations**: 15 positions per side (LONG/SHORT) ⬆️ *Updated from 10*
-- **Symbol**: `BTCUSDC` on 5-minute timeframe
+### Current Configuration (2025-09-23 Update)
+- **Active Strategy**: `ALL_OR_NOTHING` (risk management with SL/TP)
+- **Symbol**: `LINKUSDC` on 1-minute timeframe ⬆️ *Updated from BTCUSDC/5m*
+- **SL Configuration**: 0.5% offset from HIGH/LOW levels ⬆️ *Updated from 0.1%*
+- **TP Percentage**: 0.3% from entry price ⬆️ *Updated from 0.5%*
+- **Max Accumulations**: 20 positions per side (ACCUMULATOR) ⬆️ *Updated from 15*
+- **Balance Risk**: 20% of balance in PERCENTAGE mode ⬆️ *Updated from 1%*
+- **Volume Validation**: Disabled ⬆️ *Updated from enabled*
 - **RSI Periods**: 3/5/7 with thresholds 10/20/30 - 90/80/70
 - **Recovery System**: ✅ Automatic TP recovery for missing TPs
 - **Shutdown System**: ✅ Enhanced 3-level graceful shutdown
@@ -602,10 +716,11 @@ Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
 - **Execution**: Triggered when price reaches stop, executes at limit price
 
 ### Validated Features ✅
-- ✅ **Strategy switching** between CASCADE_MASTER and ACCUMULATOR
+- ✅ **Strategy switching** between CASCADE_MASTER, ACCUMULATOR, and ALL_OR_NOTHING
 - ✅ **ACCUMULATOR**: Simple orders without hedge/cascade systems
 - ✅ **CASCADE_MASTER**: Full hedge + cascade + advanced TP preserved
-- ✅ **Take Profit**: Both strategies use proper TAKE_PROFIT limit orders
+- ✅ **ALL_OR_NOTHING**: Risk management with automatic SL + fixed TP
+- ✅ **Take Profit**: All strategies use proper TAKE_PROFIT limit orders
 - ✅ **Configuration**: Real-time strategy selection via config changes
 - ✅ **Error Handling**: Comprehensive logging and error recovery
 - ✅ **WebSocket Detection**: Real-time TP execution detection for ACCUMULATOR
@@ -718,14 +833,30 @@ STRATEGY_CONFIG = {
 ACCUMULATOR_CONFIG = {
     "ENABLED": True,
     "TP_PERCENT": 0.003,        # 0.3% TP from average price
-    "MAX_ACCUMULATIONS": 10,    # Max positions per side
+    "MAX_ACCUMULATIONS": 20,    # Max positions per side (updated)
     "PRICE_OFFSET": 0.001,      # 0.1% trigger offset
+}
+```
+
+**Switch to ALL_OR_NOTHING Strategy** (Current Active):
+```python
+# In config.py
+STRATEGY_CONFIG = {
+    "STRATEGY_TYPE": "ALL_OR_NOTHING"  # Risk management with SL/TP (CURRENT)
+}
+
+ALL_OR_NOTHING_CONFIG = {
+    "ENABLED": True,
+    "SL_LOOKBACK_CANDLES": 5,     # Candles for SL calculation
+    "SL_OFFSET_PERCENT": 0.005,   # 0.5% SL offset (current)
+    "TP_PERCENT": 0.003,          # 0.3% TP from entry (current)
+    "PRICE_OFFSET": 0.001,        # 0.1% trigger offset
 }
 ```
 
 **Switch back to CASCADE_MASTER**:
 ```python
-# In config.py  
+# In config.py
 STRATEGY_CONFIG = {
     "STRATEGY_TYPE": "CASCADE_MASTER"  # Full hedge + cascade system
 }

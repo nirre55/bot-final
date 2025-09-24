@@ -464,21 +464,43 @@ class TradingService:
                 
                 # Récupérer le prix actuel depuis les données du signal
                 current_price = signal_data.get("current_price")
-                signal_type = signal_data.get("type")
-                
+                signal_type = signal_data.get("type") or signal_data.get("signal_type")  # Compatible avec ALL_OR_NOTHING
+
                 if not current_price or not signal_type:
                     self.logger.error("Prix actuel ou type de signal manquant dans signal_data")
                     return None
-                
-                # Calculer le prix hedge théorique
-                hedge_price = self.calculate_theoretical_hedge_price(current_price, signal_type)
-                if hedge_price is None:
-                    self.logger.error("Impossible de calculer le prix hedge théorique")
-                    return None
-                
-                # Calculer la différence de prix
-                price_difference = abs(current_price - hedge_price)
-                self.logger.info(f"Calcul price difference: CurrentPrice={current_price}, HedgePrice={hedge_price}, Diff={price_difference}")
+
+                # Utiliser sl_price si fourni (ALL_OR_NOTHING) ou calculer hedge price (CASCADE)
+                sl_price = signal_data.get("sl_price")
+                if sl_price:
+                    self.logger.info(f"Mode ALL_OR_NOTHING: Calcul distance au SL avec offset")
+
+                    # Récupérer l'offset SL depuis la configuration ALL_OR_NOTHING
+                    sl_offset = config.ALL_OR_NOTHING_CONFIG.get("SL_OFFSET_PERCENT", 0.005)
+
+                    # Calculer la distance correcte selon le sens
+                    if signal_type.lower() == "long":
+                        # LONG: Distance = Signal_Price - (SL_Level - SL_Offset)
+                        sl_with_offset = sl_price * (1 - sl_offset)
+                        price_difference = current_price - sl_with_offset
+                        self.logger.info(f"LONG: Signal={current_price}, SL_Level={sl_price}, "
+                                       f"SL_avec_offset={sl_with_offset}, Distance={price_difference}")
+                    else:  # SHORT
+                        # SHORT: Distance = (SL_Level + SL_Offset) - Signal_Price
+                        sl_with_offset = sl_price * (1 + sl_offset)
+                        price_difference = sl_with_offset - current_price
+                        self.logger.info(f"SHORT: Signal={current_price}, SL_Level={sl_price}, "
+                                       f"SL_avec_offset={sl_with_offset}, Distance={price_difference}")
+                else:
+                    # Mode CASCADE: Calculer le prix hedge théorique
+                    hedge_price = self.calculate_theoretical_hedge_price(current_price, signal_type)
+                    if hedge_price is None:
+                        self.logger.error("Impossible de calculer le prix hedge théorique")
+                        return None
+
+                    # Calculer la différence de prix pour CASCADE
+                    price_difference = abs(current_price - hedge_price)
+                    self.logger.info(f"Mode CASCADE: CurrentPrice={current_price}, HedgePrice={hedge_price}, Diff={price_difference}")
                 
                 if price_difference == 0:
                     self.logger.error("Différence de prix nulle - calcul impossible")

@@ -8,7 +8,9 @@ import config
 from strategies.base_strategy import BaseStrategy, StrategyType
 from strategies.cascade_master_strategy import CascadeMasterStrategy
 from strategies.accumulator_strategy import AccumulatorStrategy
+from strategies.all_or_nothing_strategy import AllOrNothingStrategy
 from core.accumulator_service import AccumulatorService
+from core.all_or_nothing_service import AllOrNothingService
 from api.binance_client import BinanceAPIClient
 from core.logger import get_module_logger
 
@@ -53,10 +55,13 @@ class StrategyFactory:
         try:
             if strategy_type == StrategyType.CASCADE_MASTER.value:
                 return self._create_cascade_master_strategy()
-            
+
             elif strategy_type == StrategyType.ACCUMULATOR.value:
                 return self._create_accumulator_strategy(trading_service)
-            
+
+            elif strategy_type == StrategyType.ALL_OR_NOTHING.value:
+                return self._create_all_or_nothing_strategy(trading_service)
+
             else:
                 self.logger.error(f"Type de stratégie inconnu: {strategy_type}")
                 return None
@@ -115,7 +120,40 @@ class StrategyFactory:
         except Exception as e:
             self.logger.error(f"Erreur création ACCUMULATOR: {e}", exc_info=True)
             return None
-    
+
+    def _create_all_or_nothing_strategy(
+        self,
+        trading_service: Optional[Any]
+    ) -> Optional[AllOrNothingStrategy]:
+        """
+        Crée une stratégie ALL_OR_NOTHING avec ses services
+
+        Args:
+            trading_service: Service de trading pour injection
+
+        Returns:
+            Instance ALL_OR_NOTHING ou None
+        """
+        self.logger.debug("_create_all_or_nothing_strategy called")
+
+        try:
+            # Créer le service all or nothing
+            all_or_nothing_service = AllOrNothingService(self.binance_client, trading_service)
+
+            # Configurer la référence trading service
+            if trading_service:
+                all_or_nothing_service.set_trading_service_reference(trading_service)
+
+            # Créer la stratégie avec le service
+            strategy = AllOrNothingStrategy(all_or_nothing_service)
+
+            self.logger.info("Stratégie ALL_OR_NOTHING créée avec succès")
+            return strategy
+
+        except Exception as e:
+            self.logger.error(f"Erreur création ALL_OR_NOTHING: {e}", exc_info=True)
+            return None
+
     def get_available_strategies(self) -> list[str]:
         """
         Retourne la liste des stratégies disponibles
@@ -165,7 +203,21 @@ class StrategyFactory:
                 
                 self.logger.debug("Configuration ACCUMULATOR validée")
                 return True
-            
+
+            elif strategy_type == StrategyType.ALL_OR_NOTHING.value:
+                # Vérifier la configuration requise pour ALL_OR_NOTHING
+                all_or_nothing_enabled = config.ALL_OR_NOTHING_CONFIG.get("ENABLED")
+                sl_lookback = config.ALL_OR_NOTHING_CONFIG.get("SL_LOOKBACK_CANDLES")
+                sl_offset = config.ALL_OR_NOTHING_CONFIG.get("SL_OFFSET_PERCENT")
+                tp_percent = config.ALL_OR_NOTHING_CONFIG.get("TP_PERCENT")
+
+                if not all_or_nothing_enabled or not sl_lookback or sl_offset is None or not tp_percent:
+                    self.logger.warning("Configuration ALL_OR_NOTHING incomplète")
+                    return False
+
+                self.logger.debug("Configuration ALL_OR_NOTHING validée")
+                return True
+
             else:
                 self.logger.error(f"Type de stratégie inconnu pour validation: {strategy_type}")
                 return False

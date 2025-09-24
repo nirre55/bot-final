@@ -2,8 +2,9 @@
 Service de détection de signaux de trading
 Responsabilité unique : Gestion de la logique de signaux RSI + HA en 2 étapes
 """
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, Optional, Any, Tuple, List
 from enum import Enum
+from collections import deque
 
 import config
 from core.logger import get_module_logger
@@ -28,24 +29,83 @@ class SignalService:
     def __init__(self, cascade_service=None, tp_service=None) -> None:
         """Initialise le service de signaux"""
         self.logger = get_module_logger("SignalService")
-        
+
         # Référence au service cascade (injection de dépendance)
         self.cascade_service = cascade_service
-        
+
         # Référence au service TP (injection de dépendance)
         self.tp_service = tp_service
-        
+
         # État du système de signaux
         self.current_state: SignalState = SignalState.WAITING
         self.pending_signal_type: Optional[SignalType] = None
         self.confirmed_signal: Optional[Dict[str, Any]] = None
-        
+
         # Configuration RSI depuis config
         self.rsi_periods = list(config.SIGNAL_CONFIG["RSI_THRESHOLDS"].keys())  # [3, 5, 7]
-        
+
+        # Historique des volumes pour validation
+        volume_config = config.SIGNAL_CONFIG.get("VOLUME_VALIDATION", {})
+        self.volume_validation_enabled = volume_config.get("ENABLED", False)
+        self.volume_lookback_candles = volume_config.get("LOOKBACK_CANDLES", 14)
+        self.volume_history: deque = deque(maxlen=self.volume_lookback_candles + 1)  # +1 pour la bougie courante
+
         self.logger.debug("SignalService initialisé")
         self.logger.info(f"RSI periods configurés: {self.rsi_periods}")
-    
+        if self.volume_validation_enabled:
+            self.logger.info(f"Validation volume activée: {self.volume_lookback_candles} bougies")
+
+    def update_volume_history(self, volume: float) -> None:
+        """
+        Met à jour l'historique des volumes
+
+        Args:
+            volume: Volume de la bougie fermée
+        """
+        self.logger.debug(f"update_volume_history called with volume={volume}")
+
+        if self.volume_validation_enabled:
+            self.volume_history.append(volume)
+            self.logger.debug(f"Volume ajouté à l'historique: {volume:.2f} (total: {len(self.volume_history)})")
+
+    def _validate_volume_condition(self, current_volume: float) -> bool:
+        """
+        Valide que le volume courant est supérieur à la moyenne des volumes précédents
+
+        Args:
+            current_volume: Volume de la bougie de confirmation
+
+        Returns:
+            True si validation réussie, False sinon
+        """
+        self.logger.debug(f"_validate_volume_condition called with current_volume={current_volume}")
+
+        if not self.volume_validation_enabled:
+            self.logger.debug("Validation volume désactivée")
+            return True
+
+        if len(self.volume_history) < self.volume_lookback_candles:
+            self.logger.warning(f"Historique volume insuffisant: {len(self.volume_history)}/{self.volume_lookback_candles}")
+            return True  # On laisse passer si pas assez d'historique
+
+        # Calculer la moyenne des volumes précédents (sans la bougie courante)
+        previous_volumes = list(self.volume_history)[:-1] if len(self.volume_history) > 0 else []
+
+        if not previous_volumes:
+            self.logger.warning("Aucun volume précédent disponible")
+            return True
+
+        avg_volume = sum(previous_volumes) / len(previous_volumes)
+
+        volume_valid = current_volume > avg_volume
+
+        self.logger.info(
+            f"Validation volume: {current_volume:.2f} vs moyenne {avg_volume:.2f} "
+            f"({'VALIDE' if volume_valid else 'INVALIDE'})"
+        )
+
+        return volume_valid
+
     def _check_rsi_oversold_condition(self, rsi_data: Dict[str, Dict]) -> bool:
         """
         Vérifie si TOUS les RSI sont en oversold
@@ -140,17 +200,19 @@ class SignalService:
             return None
     
     def process_market_data(
-        self, 
-        rsi_data: Optional[Dict[str, Dict]], 
-        ha_data: Optional[Dict[str, str]]
+        self,
+        rsi_data: Optional[Dict[str, Dict]],
+        ha_data: Optional[Dict[str, str]],
+        current_volume: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Traite les données de marché pour détecter les signaux
-        
+
         Args:
             rsi_data: Données RSI calculées
             ha_data: Données HA (couleur bougie)
-            
+            current_volume: Volume de la bougie courante (pour validation)
+
         Returns:
             Dictionnaire avec signal confirmé ou None
         """
@@ -175,7 +237,7 @@ class SignalService:
             return self._handle_waiting_state(rsi_data)
         
         elif self.current_state == SignalState.RSI_CONDITION_MET:
-            return self._handle_rsi_condition_met_state(ha_data)
+            return self._handle_rsi_condition_met_state(ha_data, current_volume)
         
         elif self.current_state == SignalState.SIGNAL_CONFIRMED:
             # Signal déjà confirmé - attendre qu'il soit consommé
@@ -203,25 +265,33 @@ class SignalService:
         
         return None
     
-    def _handle_rsi_condition_met_state(self, ha_data: Dict[str, str]) -> Optional[Dict[str, Any]]:
-        """Gère l'état d'attente de confirmation HA"""
+    def _handle_rsi_condition_met_state(self, ha_data: Dict[str, str], current_volume: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """Gère l'état d'attente de confirmation HA avec validation du volume"""
         self.logger.debug("_handle_rsi_condition_met_state called")
-        
+
         confirmed_signal_type = self._check_ha_confirmation(ha_data)
-        
+
         if confirmed_signal_type:
-            # Signal confirmé !
+            # Vérifier la condition de volume si configurée
+            if current_volume is not None and not self._validate_volume_condition(current_volume):
+                self.logger.info(f"❌ Signal {confirmed_signal_type.value.upper()} REJETÉ - Volume insuffisant")
+                return None
+
+            # Signal confirmé avec toutes les validations !
             self.current_state = SignalState.SIGNAL_CONFIRMED
             self.confirmed_signal = {
                 "type": confirmed_signal_type.value,
                 "rsi_periods": self.rsi_periods,
                 "ha_color": ha_data.get("color"),
+                "volume": current_volume,
+                "volume_validated": self.volume_validation_enabled and current_volume is not None,
                 "timestamp": None  # Sera ajouté par l'appelant
             }
-            
-            self.logger.info(f"✅ SIGNAL {confirmed_signal_type.value.upper()} CONFIRMÉ!")
+
+            volume_info = f" + Volume validé" if self.volume_validation_enabled and current_volume else ""
+            self.logger.info(f"✅ SIGNAL {confirmed_signal_type.value.upper()} CONFIRMÉ!{volume_info}")
             return self.confirmed_signal
-        
+
         return None
     
     def _are_tp_orders_active(self) -> bool:

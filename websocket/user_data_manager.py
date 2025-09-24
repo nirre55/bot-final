@@ -264,18 +264,28 @@ class UserDataStreamManager:
                 if self.order_execution_handler:
                     self.order_execution_handler(execution_data)
                 
-                # NOUVEAU : Envoyer aussi à AccumulatorService si stratégie ACCUMULATOR active
-                if (self.trading_bot and 
-                    hasattr(self.trading_bot, 'strategy_manager') and 
-                    self.trading_bot.strategy_manager.current_strategy_type == "ACCUMULATOR"):
-                    
-                    try:
-                        accumulator_service = self.trading_bot.strategy_manager.current_strategy.accumulator_service
-                        accumulator_service.handle_order_execution_from_websocket(execution_data)
-                    except AttributeError:
-                        self.logger.debug("AccumulatorService non accessible depuis la stratégie courante")
-                    except Exception as acc_error:
-                        self.logger.error(f"Erreur envoi à AccumulatorService: {acc_error}")
+                # Envoyer aux stratégies qui gèrent les événements WebSocket
+                if self.trading_bot and hasattr(self.trading_bot, 'strategy_manager'):
+                    strategy_type = self.trading_bot.strategy_manager.current_strategy_type
+                    current_strategy = self.trading_bot.strategy_manager.current_strategy
+
+                    if strategy_type == "ACCUMULATOR":
+                        try:
+                            accumulator_service = current_strategy.accumulator_service
+                            accumulator_service.handle_order_execution_from_websocket(execution_data)
+                        except AttributeError:
+                            self.logger.debug("AccumulatorService non accessible depuis la stratégie courante")
+                        except Exception as acc_error:
+                            self.logger.error(f"Erreur envoi à AccumulatorService: {acc_error}")
+
+                    elif strategy_type == "ALL_OR_NOTHING":
+                        try:
+                            # Envoyer à la stratégie AllOrNothing pour gestion des SL/TP
+                            current_strategy.handle_order_execution_from_websocket(execution_data)
+                        except AttributeError:
+                            self.logger.debug("AllOrNothingStrategy non accessible depuis la stratégie courante")
+                        except Exception as aon_error:
+                            self.logger.error(f"Erreur envoi à AllOrNothingStrategy: {aon_error}")
                     
         except Exception as e:
             self.logger.error(f"Erreur lors du traitement ORDER_TRADE_UPDATE: {e}", exc_info=True)
