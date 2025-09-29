@@ -63,7 +63,7 @@ class BinanceTradingBot:
         if not strategy_initialized:
             self.logger.error("❌ Échec initialisation stratégie - Arrêt du bot")
             raise RuntimeError("Impossible d'initialiser la stratégie de trading")
-        
+
         # Variables pour gérer la mise à jour des RSI et HA
         self.cached_rsi_data: Optional[Dict[str, Dict]] = None
         self.cached_ha_data: Optional[Dict[str, str]] = None
@@ -73,14 +73,17 @@ class BinanceTradingBot:
 
         # Volume de la bougie fermée pour validation
         self._current_volume: Optional[float] = None
-        
+
         # Le WebSocket manager sera initialisé avec un handler de messages
         self.websocket_manager: WebSocketManager
         self._init_websocket_manager()
-        
+
         # User Data Stream WebSocket pour les exécutions d'ordres
         self.user_data_manager: UserDataStreamManager
         self._init_user_data_manager()
+
+        # Configurer le user_data_manager pour la stratégie (après initialisation)
+        self.strategy_manager.set_user_data_manager(self.user_data_manager)
         
         self.logger.info("Bot de trading initialisé avec tous ses composants")
         

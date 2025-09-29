@@ -136,7 +136,7 @@ class AllOrNothingStrategy(BaseStrategy):
 
     def update_candle_data(self, candle_data: Dict[str, Any]) -> None:
         """
-        Met à jour les données de bougies pour le calcul des SL
+        Met à jour les données de bougies pour le calcul des SL, monitoring RSI et trailing stop
 
         Args:
             candle_data: Données de la bougie fermée
@@ -150,7 +150,17 @@ class AllOrNothingStrategy(BaseStrategy):
                 "volume": float(candle_data.get("v", 0))
             }
 
+            # Prix de fermeture pour monitoring
+            close_price = candle_info["close"]
+
+            # Mettre à jour l'historique pour calcul SL
             self.all_or_nothing_service.update_candle_history(candle_info)
+
+            # Vérifier les conditions de sortie RSI dynamique
+            self.all_or_nothing_service.process_candle_close_for_dynamic_exit(candle_data)
+
+            # Vérifier les conditions de trailing stop
+            self.all_or_nothing_service.process_candle_close_for_trailing_stop(close_price)
 
         except Exception as e:
             self.logger.error(f"Erreur mise à jour bougies ALL_OR_NOTHING: {e}", exc_info=True)
@@ -158,5 +168,7 @@ class AllOrNothingStrategy(BaseStrategy):
     def get_strategy_config(self) -> Dict[str, Any]:
         """Retourne la configuration ALL_OR_NOTHING"""
         return {
-            "all_or_nothing": config.ALL_OR_NOTHING_CONFIG
+            "all_or_nothing": config.ALL_OR_NOTHING_CONFIG,
+            "dynamic_rsi_exit_enabled": config.ALL_OR_NOTHING_CONFIG.get("DYNAMIC_RSI_EXIT", {}).get("ENABLED", False),
+            "trailing_stop_enabled": config.ALL_OR_NOTHING_CONFIG.get("TRAILING_STOP", {}).get("ENABLED", False)
         }

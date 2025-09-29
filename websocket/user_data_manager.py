@@ -286,6 +286,15 @@ class UserDataStreamManager:
                             self.logger.debug("AllOrNothingStrategy non accessible depuis la stratégie courante")
                         except Exception as aon_error:
                             self.logger.error(f"Erreur envoi à AllOrNothingStrategy: {aon_error}")
+
+                    elif strategy_type == "ONE_OR_MORE":
+                        try:
+                            # Envoyer à la stratégie OneOrMore pour gestion des hedge/TP/STOP
+                            current_strategy.handle_order_execution_from_websocket(execution_data)
+                        except AttributeError:
+                            self.logger.debug("OneOrMoreStrategy non accessible depuis la stratégie courante")
+                        except Exception as oom_error:
+                            self.logger.error(f"Erreur envoi à OneOrMoreStrategy: {oom_error}")
                     
         except Exception as e:
             self.logger.error(f"Erreur lors du traitement ORDER_TRADE_UPDATE: {e}", exc_info=True)

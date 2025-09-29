@@ -9,6 +9,7 @@ from strategies.base_strategy import BaseStrategy, StrategyType
 from strategies.cascade_master_strategy import CascadeMasterStrategy
 from strategies.accumulator_strategy import AccumulatorStrategy
 from strategies.all_or_nothing_strategy import AllOrNothingStrategy
+from strategies.one_or_more_strategy import OneOrMoreStrategy
 from core.accumulator_service import AccumulatorService
 from core.all_or_nothing_service import AllOrNothingService
 from api.binance_client import BinanceAPIClient
@@ -61,6 +62,9 @@ class StrategyFactory:
 
             elif strategy_type == StrategyType.ALL_OR_NOTHING.value:
                 return self._create_all_or_nothing_strategy(trading_service)
+
+            elif strategy_type == StrategyType.ONE_OR_MORE.value:
+                return self._create_one_or_more_strategy()
 
             else:
                 self.logger.error(f"Type de stratégie inconnu: {strategy_type}")
@@ -154,6 +158,26 @@ class StrategyFactory:
             self.logger.error(f"Erreur création ALL_OR_NOTHING: {e}", exc_info=True)
             return None
 
+    def _create_one_or_more_strategy(self) -> Optional[OneOrMoreStrategy]:
+        """
+        Crée une stratégie ONE_OR_MORE avec ses services
+
+        Returns:
+            Instance ONE_OR_MORE ou None
+        """
+        self.logger.debug("_create_one_or_more_strategy called")
+
+        try:
+            # Créer la stratégie avec le binance_client (pas de user_data_manager ici)
+            strategy = OneOrMoreStrategy(self.binance_client, None)
+
+            self.logger.info("✅ Stratégie ONE_OR_MORE créée avec succès")
+            return strategy
+
+        except Exception as e:
+            self.logger.error(f"Erreur création ONE_OR_MORE: {e}", exc_info=True)
+            return None
+
     def get_available_strategies(self) -> list[str]:
         """
         Retourne la liste des stratégies disponibles
@@ -216,6 +240,20 @@ class StrategyFactory:
                     return False
 
                 self.logger.debug("Configuration ALL_OR_NOTHING validée")
+                return True
+
+            elif strategy_type == StrategyType.ONE_OR_MORE.value:
+                # Vérifier la configuration requise pour ONE_OR_MORE
+                one_or_more_enabled = config.ONE_OR_MORE_CONFIG.get("ENABLED")
+                sl_lookback = config.ONE_OR_MORE_CONFIG.get("SL_LOOKBACK_CANDLES")
+                sl_offset = config.ONE_OR_MORE_CONFIG.get("SL_OFFSET_PERCENT")
+                hedge_multiplier = config.ONE_OR_MORE_CONFIG.get("HEDGE_QUANTITY_MULTIPLIER")
+
+                if not one_or_more_enabled or not sl_lookback or sl_offset is None or not hedge_multiplier:
+                    self.logger.warning("Configuration ONE_OR_MORE incomplète")
+                    return False
+
+                self.logger.debug("Configuration ONE_OR_MORE validée")
                 return True
 
             else:

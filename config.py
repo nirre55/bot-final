@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 SYMBOL: str = "LINKUSDC"  # Symbole
-TIMEFRAME: str = "1m"  # Timeframe
+TIMEFRAME: str = "5m"  # Timeframe
 
 # Configuration API Binance
 BINANCE_API_KEY: Optional[str] = os.getenv("BINANCE_API_KEY")
@@ -30,7 +30,7 @@ SIGNAL_CONFIG: Dict[str, Any] = {
     "RSI_THRESHOLDS": {
         3: {"OVERSOLD": 10, "OVERBOUGHT": 90},  # RSI 3: plus sensible
         5: {"OVERSOLD": 20, "OVERBOUGHT": 80},  # RSI 5: standard
-        7: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7: moins sensible
+        7: {"OVERSOLD": 30, "OVERBOUGHT": 70},  # RSI 7/: moins sensible
     },
     "VOLUME_VALIDATION": {
         "ENABLED": False,  # Activer/désactiver la validation de volume
@@ -42,7 +42,7 @@ SIGNAL_CONFIG: Dict[str, Any] = {
 TRADING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MODE": "PERCENTAGE",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
     "INITIAL_QUANTITY": 1,  # Quantité de départ fixe (mode FIXED)
-    "BALANCE_PERCENTAGE": 0.2,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 20%
+    "BALANCE_PERCENTAGE": 0.01,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 1%
     "PROGRESSION_MODE": "STEP",  # "DOUBLE" (actuel) ou "STEP" (incrémentation par pas)
 }
 
@@ -64,7 +64,7 @@ CASCADE_CONFIG: Dict[str, Any] = {
 
 # Configuration des stratégies de trading
 STRATEGY_CONFIG: Dict[str, Any] = {
-    "STRATEGY_TYPE": "ALL_OR_NOTHING",  # "ACCUMULATOR", "CASCADE_MASTER", ou "ALL_OR_NOTHING"
+    "STRATEGY_TYPE": "ONE_OR_MORE",  # "ACCUMULATOR", "CASCADE_MASTER", "ALL_OR_NOTHING", ou "ONE_OR_MORE"
 }
 
 # Configuration stratégie ACCUMULATOR
@@ -79,9 +79,33 @@ ACCUMULATOR_CONFIG: Dict[str, Any] = {
 ALL_OR_NOTHING_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver la stratégie all or nothing
     "SL_LOOKBACK_CANDLES": 5,  # Nombre de bougies pour HIGH/LOW du SL
-    "SL_OFFSET_PERCENT": 0.005,  # 0.5% offset pour SL
+    "SL_OFFSET_PERCENT": 0.00001,  # 0.001% offset pour SL
     "TP_PERCENT": 0.003,  # 0.3% TP fixe du prix d'entrée
     "PRICE_OFFSET": 0.001,  # Offset entre stopPrice et price pour l'ordre limite (0.1%)
+    "DYNAMIC_RSI_EXIT": {
+        "ENABLED": True,  # Activer/désactiver le TP dynamique basé sur RSI
+        "MONITOR_FREQUENCY": "candle_close",  # Fréquence de monitoring ("candle_close")
+        "EXIT_TYPE": "MARKET",  # Type d'ordre de sortie ("MARKET" ou "LIMIT")
+        "CANCEL_FIXED_ORDERS": True,  # Annuler SL/TP fixe après sortie RSI réussie
+    },
+    "TRAILING_STOP": {
+        "ENABLED": True,  # Activer/désactiver le trailing stop
+        "PRICE_TRIGGER_PERCENT": 0.005,  # X% = 0.5% mouvement prix pour déclencher trailing
+        "SL_ADJUSTMENT_PERCENT": 0.005,  # Y% = 0.5% ajustement du SL (sur ancien SL)
+        "MONITOR_FREQUENCY": "candle_close",  # Fréquence de vérification ("candle_close")
+        "UPDATE_METHOD": "modify_order",  # Méthode mise à jour SL ("modify_order" ou "cancel_create")
+    },
+}
+
+# Configuration stratégie ONE_OR_MORE
+ONE_OR_MORE_CONFIG: Dict[str, Any] = {
+    "ENABLED": True,  # Activer/désactiver la stratégie one or more
+    "SL_LOOKBACK_CANDLES": 5,  # Nombre de bougies pour HIGH/LOW du hedge
+    "SL_OFFSET_PERCENT": 0.00001,  # 0.001% offset pour hedge placement
+    "HEDGE_QUANTITY_MULTIPLIER": 2,  # Multiplicateur quantité hedge (2x)
+    "TP_SAFETY_OFFSET_PERCENT": 0.0002,  # 0.02% offset de sécurité pour éviter trigger immédiat des TP
+    "MIN_DISTANCE_PERCENT": 0.002,  # 0.2% seuil minimum pour distance
+    "SMALL_DISTANCE_OFFSET_PERCENT": 0.0015,  # 0.15% offset supplémentaire si distance < seuil
 }
 
 # Configuration du système Take Profit (CASCADE_MASTER seulement)

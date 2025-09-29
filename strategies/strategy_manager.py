@@ -71,7 +71,7 @@ class StrategyManager:
             # Définir la nouvelle stratégie
             self.current_strategy = strategy
             self.current_strategy_type = strategy_type
-            
+
             # Logger les informations de la stratégie
             self.strategy_factory.log_strategy_info(strategy)
             
@@ -81,6 +81,23 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Erreur initialisation stratégie: {e}", exc_info=True)
             return False
+
+    def set_user_data_manager(self, user_data_manager) -> None:
+        """
+        Configure le user_data_manager pour la stratégie courante
+
+        Args:
+            user_data_manager: Manager User Data Stream
+        """
+        try:
+            if self.current_strategy and hasattr(self.current_strategy, 'user_data_manager'):
+                self.current_strategy.user_data_manager = user_data_manager
+                if user_data_manager:
+                    user_data_manager.trading_bot_reference = self.current_strategy
+                self.logger.debug(f"User Data Manager configuré pour {self.current_strategy_type}")
+
+        except Exception as e:
+            self.logger.error(f"Erreur configuration User Data Manager: {e}", exc_info=True)
     
     def execute_signal(
         self, 

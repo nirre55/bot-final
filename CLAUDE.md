@@ -224,8 +224,14 @@ ALL_OR_NOTHING_CONFIG = {
     "ENABLED": True,
     "SL_LOOKBACK_CANDLES": 5,    # Candles for HIGH/LOW analysis
     "SL_OFFSET_PERCENT": 0.005,  # 0.5% SL offset from HIGH/LOW (updated from 0.1%)
-    "TP_PERCENT": 0.003,         # 0.3% TP from entry price (updated from 0.5%)
+    "TP_PERCENT": 0.003,         # 0.3% TP from entry price (only if dynamic RSI disabled)
     "PRICE_OFFSET": 0.001,       # 0.1% trigger offset for orders
+    "DYNAMIC_RSI_EXIT": {
+        "ENABLED": True,         # Enable/disable dynamic RSI-based exit
+        "MONITOR_FREQUENCY": "candle_close",  # Monitor on each candle close
+        "EXIT_TYPE": "MARKET",   # Exit order type (MARKET for immediate execution)
+        "CANCEL_FIXED_ORDERS": True,  # Cancel SL after RSI exit (TP not created in dynamic mode)
+    }
 }
 ```
 
@@ -243,12 +249,42 @@ ALL_OR_NOTHING_CONFIG = {
 - **Position reset**: After SL/TP execution, ready to accept new signals for that side
 - **Order creation retry**: Up to 5 attempts for SL and TP creation, system stops if all fail
 
+### **Dynamic RSI-Based Exit Feature**
+
+The ALL_OR_NOTHING strategy includes an advanced **Dynamic Take Profit** system based on RSI momentum:
+
+**Dynamic Exit Logic**:
+- **LONG Position** → Exit when **ALL RSI periods are OVERBOUGHT** (RSI_3≥90 AND RSI_5≥80 AND RSI_7≥70)
+- **SHORT Position** → Exit when **ALL RSI periods are OVERSOLD** (RSI_3≤10 AND RSI_5≤20 AND RSI_7≤30)
+
+**Key Features**:
+- **Replaces Fixed TP**: When enabled, NO fixed TP is created (only SL for protection)
+- **Real-time Monitoring**: Checks RSI conditions on every closed candle
+- **Market Order Exit**: Immediate MARKET order when conditions are met
+- **Automatic SL Cancellation**: SL cancelled after successful RSI exit
+
+**Workflow with Dynamic RSI Exit**:
+```
+1. Signal LONG detected → Position created + SL created (NO fixed TP)
+2. Real-time RSI monitoring on each candle close
+3. Candle closes with: RSI_3=91, RSI_5=82, RSI_7=72
+4. 🎯 ALL CONDITIONS MET → Immediate MARKET SELL order
+5. ✅ Position closed + SL automatically cancelled
+6. 🔄 Ready for new signals
+```
+
+**Configuration Options**:
+- **ENABLED**: `True` = Dynamic RSI exit, `False` = Fixed TP at 0.3%
+- **MONITOR_FREQUENCY**: Always "candle_close" for optimal timing
+- **EXIT_TYPE**: "MARKET" for immediate execution
+- **CANCEL_FIXED_ORDERS**: Auto-cancel SL after RSI exit
+
 **Risk Profile**:
-- **Conservative**: Fixed risk/reward ratio with known maximum loss
-- **Predictable**: Distance-based risk calculation to SL level
-- **Market-aware**: SL placement follows natural support/resistance levels
-- **Efficient**: Single entry/exit per signal with automatic cross-cancellation
-- **Risk-controlled**: Percentage-based position sizing to SL distance
+- **Adaptive**: Exit based on market momentum rather than fixed percentage
+- **Market-driven**: Follows RSI overbought/oversold conditions
+- **SL Protection**: Maintains stop-loss for risk management
+- **No Fixed Ceiling**: Can capture larger moves when momentum persists
+- **Risk-controlled**: Distance-based position sizing to SL level
 
 ## Trading Signal System
 

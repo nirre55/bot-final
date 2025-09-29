@@ -14,6 +14,7 @@ class StrategyType(Enum):
     ACCUMULATOR = "ACCUMULATOR"
     CASCADE_MASTER = "CASCADE_MASTER"
     ALL_OR_NOTHING = "ALL_OR_NOTHING"
+    ONE_OR_MORE = "ONE_OR_MORE"
 
 
 class BaseStrategy(ABC):
@@ -22,6 +23,8 @@ class BaseStrategy(ABC):
     def __init__(self) -> None:
         """Initialise la stratégie de base"""
         self.logger = get_module_logger(self.__class__.__name__)
+        # Attribut optionnel pour les stratégies qui utilisent WebSocket
+        self.user_data_manager: Optional[Any] = None
         self.logger.debug(f"Stratégie {self.__class__.__name__} initialisée")
     
     @abstractmethod
