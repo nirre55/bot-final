@@ -42,7 +42,7 @@ SIGNAL_CONFIG: Dict[str, Any] = {
 TRADING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MODE": "PERCENTAGE",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
     "INITIAL_QUANTITY": 1,  # Quantité de départ fixe (mode FIXED)
-    "BALANCE_PERCENTAGE": 0.01,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 1%
+    "BALANCE_PERCENTAGE": 0.03,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 3%
     "PROGRESSION_MODE": "STEP",  # "DOUBLE" (actuel) ou "STEP" (incrémentation par pas)
 }
 
@@ -103,9 +103,21 @@ ONE_OR_MORE_CONFIG: Dict[str, Any] = {
     "SL_LOOKBACK_CANDLES": 5,  # Nombre de bougies pour HIGH/LOW du hedge
     "SL_OFFSET_PERCENT": 0.00001,  # 0.001% offset pour hedge placement
     "HEDGE_QUANTITY_MULTIPLIER": 2,  # Multiplicateur quantité hedge (2x)
+    "RR_RATIO": 1.0,  # Ratio Risk-Reward initial pour TP signal (avant exécution hedge)
     "TP_SAFETY_OFFSET_PERCENT": 0.0002,  # 0.02% offset de sécurité pour éviter trigger immédiat des TP
     "MIN_DISTANCE_PERCENT": 0.002,  # 0.2% seuil minimum pour distance
     "SMALL_DISTANCE_OFFSET_PERCENT": 0.0015,  # 0.15% offset supplémentaire si distance < seuil
+    "ASYMMETRIC_TP": {
+        "ENABLED": True,  # Activer/désactiver les TP asymétriques après hedge execution
+        "RR_RATIO_SIGNAL_AFTER_HEDGE": 0.5,  # RR pour TP signal APRÈS hedge (0.5 = sécurisation)
+        "RR_RATIO_HEDGE_AFTER_HEDGE": 1.5,  # RR pour TP hedge APRÈS hedge (1.5 = profit max)
+    },
+    "TRADING_HOURS": {
+        "ENABLED": False,  # Activer/désactiver la restriction horaire
+        "START_HOUR": 5,  # Heure de début (0-23) - 5h du matin
+        "END_HOUR": 21,  # Heure de fin (0-23) - 21h (9pm)
+        "TIMEZONE": "America/New_York",  # Fuseau horaire (ex: "America/New_York", "Europe/Paris", "UTC")
+    },
 }
 
 # Configuration du système Take Profit (CASCADE_MASTER seulement)

@@ -12,8 +12,8 @@ This is a Python-based **Binance futures trading bot** that connects to real-tim
 The bot follows a **layered architecture** where each component has a single responsibility:
 
 - **`trading_bot.py`**: Main orchestrator that coordinates all services and handles WebSocket message processing
-- **Strategy Layer** (`strategies/`): Trading strategy implementations and management (StrategyManager, CascadeMaster, Accumulator)
-- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService, TradingService, CascadeService, AccumulatorService)  
+- **Strategy Layer** (`strategies/`): Trading strategy implementations and management (StrategyManager, CascadeMaster, Accumulator, AllOrNothing, OneOrMore)
+- **Service Layer** (`core/`): Business logic orchestration (RSIService, HAService, SignalService, TradingService, CascadeService, AccumulatorService, AllOrNothingService, OneOrMoreService)
 - **Indicator Layer** (`indicators/`): Pure calculation logic (RSI, Heikin Ashi)
 - **API Layer** (`api/`): External service communication (Binance REST API, market data)
 - **WebSocket Layer** (`websocket/`): Dual WebSocket streams (klines + User Data Stream) with auto-reconnection
@@ -29,6 +29,8 @@ The bot triggers calculations **only on candle close events** detected through W
 7. Strategy-specific execution:
    - **CASCADE_MASTER**: Full trading system (hedge + cascade + TP)
    - **ACCUMULATOR**: Simple orders with accumulation logic
+   - **ALL_OR_NOTHING**: Risk management with SL + TP + dynamic RSI exit
+   - **ONE_OR_MORE**: Advanced 1RR system with hedge + dual TP + cross-stops
 8. Real-time order execution detection via User Data Stream → `UserDataStreamManager`
 
 ## Common Commands
@@ -138,6 +140,7 @@ STRATEGY_CONFIG = {
 - `"CASCADE_MASTER"` - Advanced strategy with hedge + cascade + dynamic TP
 - `"ACCUMULATOR"` - Simple strategy with position accumulation + fixed TP
 - `"ALL_OR_NOTHING"` - Risk management strategy with automatic Stop Loss + fixed TP
+- `"ONE_OR_MORE"` - Advanced strategy with automatic hedge and 1RR Take Profit system
 
 **Strategy Switching**: Change `STRATEGY_TYPE` in config and restart the bot.
 
@@ -285,6 +288,140 @@ The ALL_OR_NOTHING strategy includes an advanced **Dynamic Take Profit** system 
 - **SL Protection**: Maintains stop-loss for risk management
 - **No Fixed Ceiling**: Can capture larger moves when momentum persists
 - **Risk-controlled**: Distance-based position sizing to SL level
+
+### ONE_OR_MORE Strategy (Advanced 1RR System)
+**Advanced strategy** with automatic hedge and guaranteed 1:1 Risk-Reward ratio:
+
+**Workflow**:
+1. **Signal detected** → Check existing positions for same side
+2. **Signal execution** → Market order at current price
+3. **Hedge creation** → Automatic STOP order at support/resistance (2x quantity)
+4. **TP calculation** → 1RR Take Profit system based on distance to hedge
+5. **TP creation** → Two TP orders (one for signal position, one for hedge position)
+6. **Cross-stop orders** → STOP orders created to guarantee 1RR when either TP is hit
+7. **WebSocket monitoring** → Real-time execution detection
+8. **Cross-cancellation** → Automatic cleanup when positions are closed
+
+**Key Features**:
+- ✅ **Automatic Hedge** at market structure levels (support/resistance)
+- ✅ **1:1 Risk-Reward** guaranteed through mathematical TP placement
+- ✅ **Dual TP System** for both signal and hedge positions
+- ✅ **Cross-Stop Protection** to lock in 1RR when one TP is hit
+- ✅ **Independent Sides** LONG and SHORT positions managed separately
+- ✅ **WebSocket Integration** for instant execution detection
+- ✅ **Retry Mechanism** for order creation failures
+
+**RR Logic Explained** (Asymmetric mode - configurable):
+
+**Configuration**: The asymmetric TP logic can be enabled/disabled via `ASYMMETRIC_TP.ENABLED`
+
+**Phase 1: Signal executed, hedge NOT yet executed**
+```
+Signal LONG @ 100.0 ✅
+Hedge SHORT @ 98.0 (STOP order, waiting)
+Distance = 2.0
+
+TP Signal LONG = 100.0 + (2.0 × RR_RATIO) = 102.0 (1.0RR by default)
+TP Hedge = NOT YET CREATED (waiting for hedge execution)
+```
+
+**Phase 2A: Hedge executed → ASYMMETRIC TP UPDATE** (if `ASYMMETRIC_TP.ENABLED = True`)
+```
+Hedge SHORT @ 98.0 EXECUTED ✅
+
+Action 1: UPDATE TP Signal (closer for security)
+  Old TP: 102.0 (1.0RR) → Cancelled
+  New TP: 100.0 + (2.0 × 0.5) = 101.0 (0.5RR) ← RR_RATIO_SIGNAL_AFTER_HEDGE
+
+Action 2: CREATE TP Hedge (farther for max profit)
+  New TP: 98.0 - (2.0 × 1.5) = 95.0 (1.5RR) ← RR_RATIO_HEDGE_AFTER_HEDGE
+
+Result: TP Signal @ 101.0 (0.5RR) + TP Hedge @ 95.0 (1.5RR)
+```
+
+**Phase 2B: Hedge executed → SYMMETRIC TP** (if `ASYMMETRIC_TP.ENABLED = False`)
+```
+Hedge SHORT @ 98.0 EXECUTED ✅
+
+Action: CREATE TP Hedge only (same RR as signal)
+  TP Signal: Unchanged @ 102.0 (1.0RR) ← No update
+  New TP Hedge: 98.0 - (2.0 × 1.0) = 96.0 (1.0RR) ← Uses RR_RATIO
+
+Result: TP Signal @ 102.0 (1.0RR) + TP Hedge @ 96.0 (1.0RR)
+```
+
+**Phase 3: One TP hits → Cross-stop created**
+```
+If TP Signal @ 101.0 hits:
+  → Close signal position (+1.0 profit = 0.5RR)
+  → Create STOP order to close hedge @ 98.0 (breakeven)
+
+If TP Hedge @ 95.0 hits:
+  → Close hedge position (+6.0 profit from 2x quantity = 1.5RR)
+  → Create STOP order to close signal @ 100.0 (breakeven)
+```
+
+**Configurable Parameters**:
+- `RR_RATIO`: Initial TP signal ratio before hedge execution (default: 1.0)
+- `ASYMMETRIC_TP.ENABLED`: Enable/disable asymmetric TP mode (default: True)
+  - **True**: Asymmetric mode (0.5RR signal + 1.5RR hedge after execution)
+  - **False**: Symmetric mode (1.0RR signal + 1.0RR hedge, classic behavior)
+- `ASYMMETRIC_TP.RR_RATIO_SIGNAL_AFTER_HEDGE`: TP signal ratio after hedge (default: 0.5)
+- `ASYMMETRIC_TP.RR_RATIO_HEDGE_AFTER_HEDGE`: TP hedge ratio after hedge (default: 1.5)
+
+**Hedge Placement Logic**:
+- **LONG Signal**: Hedge SHORT at LOW minimum of last 5 candles - 0.001% offset
+- **SHORT Signal**: Hedge LONG at HIGH maximum of last 5 candles + 0.001% offset
+- **Quantity**: 2x signal quantity for hedge order
+- **Market-based**: Uses actual candle HIGH/LOW data for natural levels
+
+**Configuration**:
+```python
+ONE_OR_MORE_CONFIG = {
+    "ENABLED": True,
+    "SL_LOOKBACK_CANDLES": 5,           # Candles for hedge placement
+    "SL_OFFSET_PERCENT": 0.00001,       # 0.001% offset for hedge
+    "HEDGE_QUANTITY_MULTIPLIER": 2,     # 2x quantity for hedge
+    "RR_RATIO": 1.0,                    # Initial TP signal ratio (before hedge execution)
+    "TP_SAFETY_OFFSET_PERCENT": 0.0002, # 0.02% safety offset for TP
+    "MIN_DISTANCE_PERCENT": 0.002,      # 0.2% minimum distance threshold
+    "SMALL_DISTANCE_OFFSET_PERCENT": 0.0015,  # 0.15% extra offset if distance < threshold
+    "ASYMMETRIC_TP": {
+        "ENABLED": True,                # Enable/disable asymmetric TP after hedge
+        "RR_RATIO_SIGNAL_AFTER_HEDGE": 0.5,  # TP signal after hedge (security)
+        "RR_RATIO_HEDGE_AFTER_HEDGE": 1.5,   # TP hedge after hedge (max profit)
+    },
+    "TRADING_HOURS": {
+        "ENABLED": True,                # Enable/disable trading hours restriction
+        "START_HOUR": 5,                # Start hour (0-23) - 5am
+        "END_HOUR": 21,                 # End hour (0-23) - 9pm
+        "TIMEZONE": "America/New_York", # Timezone (e.g., "America/New_York", "Europe/Paris", "UTC")
+    },
+}
+```
+
+**Order Types**:
+- **Signal Order**: MARKET order for immediate entry
+- **Hedge Order**: STOP_MARKET order at calculated level
+- **TP Orders**: TAKE_PROFIT orders (limit with trigger)
+- **Cross-Stop Orders**: STOP_MARKET orders created after first TP hit
+
+**Position Management**:
+- **Multiple positions allowed**: Unlike ALL_OR_NOTHING, can have multiple cycles
+- **Independent tracking**: Each LONG/SHORT side tracked separately
+- **Automatic cleanup**: All related orders cancelled when position closes
+- **State persistence**: Maintains order references for WebSocket detection
+
+**Trading Hours Restriction**:
+- **Configurable time window**: Define specific hours for signal execution (e.g., 5am-9pm)
+- **Timezone support**: Configurable timezone (America/New_York, Europe/Paris, UTC, etc.)
+- **Signal blocking**: New signals rejected outside trading hours with clear logging
+- **Existing positions preserved**: Positions opened before end time remain active with their TP/hedge
+- **Examples**:
+  - Signal at 4:00am → ⏰ Blocked (before 5am start)
+  - Signal at 20:30 → ✅ Executed (before 9pm end)
+  - Signal at 21:15 → ⏰ Blocked (after 9pm end)
+  - Position opened at 20:45 → Remains active after 9pm with TP/hedge intact
 
 ## Trading Signal System
 
@@ -705,14 +842,13 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 
 ## System Status & Recent Changes
 
-### Current Configuration (2025-09-23 Update)
-- **Active Strategy**: `ALL_OR_NOTHING` (risk management with SL/TP)
-- **Symbol**: `LINKUSDC` on 1-minute timeframe ⬆️ *Updated from BTCUSDC/5m*
-- **SL Configuration**: 0.5% offset from HIGH/LOW levels ⬆️ *Updated from 0.1%*
-- **TP Percentage**: 0.3% from entry price ⬆️ *Updated from 0.5%*
-- **Max Accumulations**: 20 positions per side (ACCUMULATOR) ⬆️ *Updated from 15*
-- **Balance Risk**: 20% of balance in PERCENTAGE mode ⬆️ *Updated from 1%*
-- **Volume Validation**: Disabled ⬆️ *Updated from enabled*
+### Current Configuration (2025-10-03 Update)
+- **Active Strategy**: `ONE_OR_MORE` (advanced 1RR hedge system) ⬆️ *Updated from ALL_OR_NOTHING*
+- **Symbol**: `LINKUSDC` on 5-minute timeframe
+- **Hedge Configuration**: 0.001% offset from HIGH/LOW levels with 2x quantity multiplier
+- **TP System**: 1:1 Risk-Reward ratio with cross-stop protection
+- **Balance Risk**: 3% of balance in PERCENTAGE mode ⬆️ *Updated from 20%*
+- **Volume Validation**: Disabled
 - **RSI Periods**: 3/5/7 with thresholds 10/20/30 - 90/80/70
 - **Recovery System**: ✅ Automatic TP recovery for missing TPs
 - **Shutdown System**: ✅ Enhanced 3-level graceful shutdown
@@ -721,28 +857,33 @@ When modifying the bot, maintain this separation of concerns and ensure all chan
 ```
 🏗️ Strategy Pattern Implementation
 ├── strategies/
-│   ├── base_strategy.py           # Abstract strategy interface
-│   ├── cascade_master_strategy.py # Advanced strategy (hedge+cascade+TP)
-│   ├── accumulator_strategy.py    # Simple strategy (accumulation+TP)
-│   ├── strategy_factory.py        # Strategy creation factory
-│   └── strategy_manager.py        # Strategy orchestration manager
+│   ├── base_strategy.py            # Abstract strategy interface
+│   ├── cascade_master_strategy.py  # Advanced strategy (hedge+cascade+TP)
+│   ├── accumulator_strategy.py     # Simple strategy (accumulation+TP)
+│   ├── all_or_nothing_strategy.py  # Risk management (SL+TP+dynamic exit)
+│   ├── one_or_more_strategy.py     # Advanced 1RR system (hedge+dual TP)
+│   ├── strategy_factory.py         # Strategy creation factory
+│   └── strategy_manager.py         # Strategy orchestration manager
 ├── core/
-│   └── accumulator_service.py     # Position accumulation service
-└── trading_bot.py                 # Integrated with StrategyManager
+│   ├── accumulator_service.py      # Position accumulation service
+│   ├── all_or_nothing_service.py   # ALL_OR_NOTHING logic
+│   └── one_or_more_service.py      # ONE_OR_MORE 1RR logic
+└── trading_bot.py                  # Integrated with StrategyManager
 ```
 
 ### Recent Fixes ✅
 1. **Strategy Integration**: Successfully integrated strategy pattern into main bot
 2. **ACCUMULATOR Corrections**: Fixed `get_initial_trade_quantity()` calls with missing `symbol` parameter
 3. **Configuration Updates**: TP percentage adjusted from 1% to 0.3% for better performance
-4. **Strategy Switching**: Verified CASCADE_MASTER ↔ ACCUMULATOR switching works correctly
-5. **WebSocket Integration**: AccumulatorService now receives real-time TP execution events
-6. **Automatic Recovery**: Bot restores ACCUMULATOR state on restart (positions + TPs + counters)
+4. **Strategy Switching**: Verified CASCADE_MASTER ↔ ACCUMULATOR ↔ ALL_OR_NOTHING ↔ ONE_OR_MORE switching works correctly
+5. **WebSocket Integration**: All services now receive real-time order execution events
+6. **Automatic Recovery**: Bot restores strategy state on restart (positions + TPs + counters)
 7. **Pylance Corrections**: Added `get_open_orders()` method to BinanceAPIClient
 8. **Enhanced Shutdown**: Implemented 3-level graceful shutdown system with resource cleanup
 9. **Automatic TP Recovery**: Missing TPs automatically recreated during position recovery
 10. **Process Cleanup**: Zombie process elimination - clean shutdown without manual intervention
 11. **CRITICAL: TP Preservation**: Fixed bot cancelling active TPs during shutdown - TPs now preserved for position closure
+12. **ONE_OR_MORE Implementation**: New advanced strategy with guaranteed 1RR through dual TP system and cross-stops
 
 ### Take Profit Orders
 Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
@@ -752,14 +893,15 @@ Both strategies use **TAKE_PROFIT** order type (limit orders with trigger):
 - **Execution**: Triggered when price reaches stop, executes at limit price
 
 ### Validated Features ✅
-- ✅ **Strategy switching** between CASCADE_MASTER, ACCUMULATOR, and ALL_OR_NOTHING
+- ✅ **Strategy switching** between CASCADE_MASTER, ACCUMULATOR, ALL_OR_NOTHING, and ONE_OR_MORE
 - ✅ **ACCUMULATOR**: Simple orders without hedge/cascade systems
 - ✅ **CASCADE_MASTER**: Full hedge + cascade + advanced TP preserved
-- ✅ **ALL_OR_NOTHING**: Risk management with automatic SL + fixed TP
+- ✅ **ALL_OR_NOTHING**: Risk management with automatic SL + fixed TP + dynamic RSI exit
+- ✅ **ONE_OR_MORE**: Advanced 1RR system with automatic hedge + dual TP + cross-stops
 - ✅ **Take Profit**: All strategies use proper TAKE_PROFIT limit orders
 - ✅ **Configuration**: Real-time strategy selection via config changes
 - ✅ **Error Handling**: Comprehensive logging and error recovery
-- ✅ **WebSocket Detection**: Real-time TP execution detection for ACCUMULATOR
+- ✅ **WebSocket Detection**: Real-time order execution detection for all strategies
 - ✅ **Automatic Recovery**: State restoration on bot restart
 - ✅ **Automatic TP Recovery**: Missing TPs automatically recreated during startup
 - ✅ **Enhanced Shutdown**: 3-level graceful shutdown with complete resource cleanup
@@ -895,6 +1037,36 @@ ALL_OR_NOTHING_CONFIG = {
 # In config.py
 STRATEGY_CONFIG = {
     "STRATEGY_TYPE": "CASCADE_MASTER"  # Full hedge + cascade system
+}
+```
+
+**Switch to ONE_OR_MORE Strategy** (Current Active):
+```python
+# In config.py
+STRATEGY_CONFIG = {
+    "STRATEGY_TYPE": "ONE_OR_MORE"  # Advanced 1RR hedge system (CURRENT)
+}
+
+ONE_OR_MORE_CONFIG = {
+    "ENABLED": True,
+    "SL_LOOKBACK_CANDLES": 5,           # Candles for hedge placement
+    "SL_OFFSET_PERCENT": 0.00001,       # 0.001% offset for hedge
+    "HEDGE_QUANTITY_MULTIPLIER": 2,     # 2x quantity for hedge
+    "RR_RATIO": 1.0,                    # Initial TP signal ratio (before hedge)
+    "TP_SAFETY_OFFSET_PERCENT": 0.0002, # 0.02% safety offset
+    "MIN_DISTANCE_PERCENT": 0.002,      # 0.2% minimum distance
+    "SMALL_DISTANCE_OFFSET_PERCENT": 0.0015,  # 0.15% extra offset
+    "ASYMMETRIC_TP": {
+        "ENABLED": True,                # Enable/disable asymmetric TP
+        "RR_RATIO_SIGNAL_AFTER_HEDGE": 0.5,  # TP signal after hedge
+        "RR_RATIO_HEDGE_AFTER_HEDGE": 1.5,   # TP hedge after hedge
+    },
+    "TRADING_HOURS": {
+        "ENABLED": True,                # Enable/disable trading hours
+        "START_HOUR": 5,                # 5am start
+        "END_HOUR": 21,                 # 9pm end
+        "TIMEZONE": "America/New_York", # Timezone
+    },
 }
 ```
 

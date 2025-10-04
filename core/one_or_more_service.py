@@ -5,10 +5,12 @@ Responsabilité unique : Gestion stratégie ONE_OR_MORE avec hedge automatique e
 """
 
 from typing import Dict, Any, Optional, List
-import config
-from core.logger import get_module_logger
-from core.trading_service import TradingService
-from api.market_data import MarketDataClient
+from datetime import datetime
+import pytz
+import config  # type: ignore
+from core.logger import get_module_logger  # type: ignore
+from core.trading_service import TradingService  # type: ignore
+from api.market_data import MarketDataClient  # type: ignore
 
 
 class OneOrMoreService:
@@ -96,6 +98,52 @@ class OneOrMoreService:
         except Exception as e:
             self.logger.error(f"Erreur initialisation historique bougies: {e}", exc_info=True)
 
+    def _is_within_trading_hours(self) -> bool:
+        """
+        Vérifie si l'heure actuelle est dans la plage horaire de trading configurée
+
+        Returns:
+            True si dans la plage horaire, False sinon
+        """
+        trading_hours_config = self.config.get("TRADING_HOURS", {})
+
+        # Si la restriction horaire est désactivée, toujours autoriser
+        if not trading_hours_config.get("ENABLED", False):
+            return True
+
+        try:
+            # Récupérer la configuration
+            start_hour = trading_hours_config.get("START_HOUR", 0)
+            end_hour = trading_hours_config.get("END_HOUR", 23)
+            timezone_str = trading_hours_config.get("TIMEZONE", "UTC")
+
+            # Obtenir l'heure actuelle dans le fuseau horaire configuré
+            timezone = pytz.timezone(timezone_str)
+            current_time = datetime.now(timezone)
+            current_hour = current_time.hour
+
+            # Vérifier si l'heure actuelle est dans la plage
+            if start_hour <= end_hour:
+                # Plage normale (ex: 5h-21h)
+                is_within = start_hour <= current_hour < end_hour
+            else:
+                # Plage qui traverse minuit (ex: 21h-5h)
+                is_within = current_hour >= start_hour or current_hour < end_hour
+
+            if not is_within:
+                self.logger.info(
+                    f"⏰ Hors plage horaire de trading: "
+                    f"Heure actuelle: {current_time.strftime('%H:%M:%S')} ({timezone_str}), "
+                    f"Plage autorisée: {start_hour:02d}:00-{end_hour:02d}:00"
+                )
+
+            return is_within
+
+        except Exception as e:
+            self.logger.error(f"Erreur vérification plage horaire: {e}", exc_info=True)
+            # En cas d'erreur, autoriser le trading par sécurité
+            return True
+
     def execute_signal(self, signal_type: str, symbol: str, signal_info: Dict[str, Any]) -> bool:
         """
         Exécute un signal avec la logique ONE_OR_MORE
@@ -111,6 +159,11 @@ class OneOrMoreService:
         self.logger.info(f"🎯 Exécution signal ONE_OR_MORE {signal_type} pour {symbol}")
 
         try:
+            # 0. Vérifier la plage horaire de trading
+            if not self._is_within_trading_hours():
+                self.logger.warning(f"⏰ Signal {signal_type} bloqué: hors plage horaire de trading")
+                return False
+
             # 1. Calculer le niveau hedge (réutilise logique ALL_OR_NOTHING)
             hedge_price = self._calculate_hedge_price(signal_type)
             if not hedge_price:
@@ -179,6 +232,82 @@ class OneOrMoreService:
 
         except Exception as e:
             self.logger.error(f"Erreur exécution signal ONE_OR_MORE: {e}", exc_info=True)
+            return False
+
+    def _update_tp_signal_after_hedge(self, position_side: str, symbol: str, signal_price: float,
+                                     distance: float, signal_quantity: float) -> bool:
+        """
+        Met à jour le TP signal existant avec le nouveau ratio RR après exécution du hedge
+
+        Args:
+            position_side: "LONG" ou "SHORT"
+            symbol: Symbole
+            signal_price: Prix d'entrée du signal
+            distance: Distance au hedge
+            signal_quantity: Quantité du signal
+
+        Returns:
+            True si succès, False sinon
+        """
+        try:
+            # Récupérer le ratio RR après hedge depuis ASYMMETRIC_TP config
+            asymmetric_tp_config = self.config.get("ASYMMETRIC_TP", {})
+            rr_ratio_after_hedge = float(asymmetric_tp_config.get("RR_RATIO_SIGNAL_AFTER_HEDGE", 0.5))
+            rr_ratio_initial = float(self.config.get("RR_RATIO", 1.0))
+
+            self.logger.info(
+                f"🔄 Mise à jour TP signal {position_side} avec nouveau ratio {rr_ratio_after_hedge}RR "
+                f"(ancien: {rr_ratio_initial}RR)"
+            )
+
+            # Récupérer l'ancien TP
+            old_tp = self.active_tp_long if position_side == "LONG" else self.active_tp_short
+            if not old_tp:
+                self.logger.error(f"❌ Aucun TP signal {position_side} actif à mettre à jour")
+                return False
+
+            old_tp_id = old_tp.get("orderId")
+            old_tp_price = old_tp.get("price")
+
+            # Calculer le nouveau prix TP avec le ratio après hedge
+            new_tp_price = self._calculate_tp_signal_price(
+                position_side, signal_price, distance, rr_ratio=rr_ratio_after_hedge
+            )
+
+            self.logger.info(
+                f"📊 TP signal {position_side}: Ancien prix: {old_tp_price:.6f}, "
+                f"Nouveau prix: {new_tp_price:.6f}"
+            )
+
+            # Annuler l'ancien TP
+            self.logger.info(f"🗑️ Annulation ancien TP signal {position_side}: {old_tp_id}")
+            cancel_result = self.binance_client.cancel_order(symbol, old_tp_id)
+
+            if not cancel_result:
+                self.logger.error(f"❌ Échec annulation ancien TP signal {old_tp_id}")
+                return False
+
+            # Créer le nouveau TP avec le nouveau prix
+            new_tp = self._create_tp_signal_order(position_side, symbol, signal_quantity, new_tp_price)
+
+            if new_tp:
+                # Mettre à jour la référence du TP actif
+                if position_side == "LONG":
+                    self.active_tp_long = new_tp
+                else:
+                    self.active_tp_short = new_tp
+
+                self.logger.info(
+                    f"✅ TP signal {position_side} mis à jour avec succès: "
+                    f"ID {new_tp.get('orderId')} @ {new_tp_price:.6f} ({rr_ratio_after_hedge}RR)"
+                )
+                return True
+            else:
+                self.logger.error(f"❌ Échec création nouveau TP signal {position_side}")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Erreur mise à jour TP signal après hedge: {e}", exc_info=True)
             return False
 
     def _calculate_hedge_price(self, signal_type: str) -> Optional[float]:
@@ -315,40 +444,50 @@ class OneOrMoreService:
             self.logger.error(f"Erreur création ordre hedge: {e}", exc_info=True)
             return None
 
-    def _calculate_tp_signal_price(self, signal_type: str, signal_price: float, distance: float) -> float:
+    def _calculate_tp_signal_price(self, signal_type: str, signal_price: float, distance: float,
+                                   rr_ratio: Optional[float] = None) -> float:
         """
-        Calcule le prix TP signal (1RR) avec offset de sécurité et offset pour petites distances
+        Calcule le prix TP signal avec ratio RR configurable et offsets
 
         Args:
             signal_type: "LONG" ou "SHORT"
             signal_price: Prix d'entrée signal
             distance: Distance au hedge
+            rr_ratio: Ratio RR optionnel (si None, utilise RR_RATIO de la config)
 
         Returns:
-            Prix TP à 1RR avec offsets
+            Prix TP avec ratio RR appliqué et offsets
         """
+        # Récupérer le ratio RR (paramètre ou config)
+        if rr_ratio is None:
+            rr_ratio = float(self.config.get("RR_RATIO", 1.0))
+
+        # S'assurer que rr_ratio est un float valide
+        rr_ratio = float(rr_ratio)
+
         # Offset de sécurité pour éviter déclenchement immédiat (depuis config)
-        safety_offset = signal_price * self.config.get("TP_SAFETY_OFFSET_PERCENT", 0.0005)
+        safety_offset_percent = float(self.config.get("TP_SAFETY_OFFSET_PERCENT", 0.0005))
+        safety_offset = signal_price * safety_offset_percent
 
         # Vérifier si la distance est trop petite (< 0.2% du prix signal)
-        min_distance_percent = self.config.get("MIN_DISTANCE_PERCENT", 0.002)
+        min_distance_percent = float(self.config.get("MIN_DISTANCE_PERCENT", 0.002))
         min_distance_threshold = signal_price * min_distance_percent
 
         small_distance_offset = 0.0
         if distance < min_distance_threshold:
             # Distance trop petite, ajouter offset supplémentaire
-            small_distance_offset_percent = self.config.get("SMALL_DISTANCE_OFFSET_PERCENT", 0.0015)
+            small_distance_offset_percent = float(self.config.get("SMALL_DISTANCE_OFFSET_PERCENT", 0.0015))
             small_distance_offset = signal_price * small_distance_offset_percent
             self.logger.info(f"⚡ Distance petite ({distance:.6f} < {min_distance_threshold:.6f}) - Offset supplémentaire: {small_distance_offset:.6f}")
 
         if signal_type == "LONG":
-            # LONG: TP SELL plus haut quand distance petite = signal_price + distance + small_distance_offset - safety_offset
-            tp_price = signal_price + distance + small_distance_offset - safety_offset
+            # LONG: TP SELL = signal_price + (distance * RR_RATIO) + small_distance_offset - safety_offset
+            tp_price = signal_price + (distance * rr_ratio) + small_distance_offset - safety_offset
         else:  # SHORT
-            # SHORT: TP BUY plus bas quand distance petite = signal_price - distance - small_distance_offset + safety_offset
-            tp_price = signal_price - distance - small_distance_offset + safety_offset
+            # SHORT: TP BUY = signal_price - (distance * RR_RATIO) - small_distance_offset + safety_offset
+            tp_price = signal_price - (distance * rr_ratio) - small_distance_offset + safety_offset
 
-        self.logger.info(f"TP {signal_type} 1RR calculé: {tp_price:.6f} (signal: {signal_price:.6f}, distance: {distance:.6f}, safety: {safety_offset:.6f}, small_dist: {small_distance_offset:.6f})")
+        self.logger.info(f"TP {signal_type} {rr_ratio}RR calculé: {tp_price:.6f} (signal: {signal_price:.6f}, distance: {distance:.6f}, RR: {rr_ratio}, safety: {safety_offset:.6f}, small_dist: {small_distance_offset:.6f})")
         return tp_price
 
     def _create_tp_signal_order(self, signal_type: str, symbol: str, quantity: float, tp_price: float) -> Optional[Dict[str, Any]]:
@@ -573,15 +712,44 @@ class OneOrMoreService:
                 self.logger.error(f"Données manquantes pour TP hedge {position_side}: distance={distance}, hedge_price={hedge_price}")
                 return
 
-            self.logger.info(f"🛡️ Hedge {position_side} exécuté - Création TP hedge")
-
-            # Créer TP hedge (1RR depuis hedge_price)
             symbol = order_data.get("s", config.SYMBOL)
             hedge_quantity = float(order_data.get("z", 0))  # Quantité exécutée
 
-            self._create_tp_hedge_order(position_side, symbol, hedge_quantity, hedge_price, distance)
+            # Vérifier si les TP asymétriques sont activés
+            asymmetric_tp_config = self.config.get("ASYMMETRIC_TP", {})
+            asymmetric_enabled = asymmetric_tp_config.get("ENABLED", True)
 
-            self.logger.info(f"✅ TP hedge {position_side} créé - Système prêt")
+            if asymmetric_enabled:
+                self.logger.info(f"🛡️ Hedge {position_side} exécuté - Mode ASYMÉTRIQUE: Mise à jour TP signal + Création TP hedge")
+
+                # 1. Mettre à jour le TP signal existant avec nouveau ratio RR (0.5RR par défaut)
+                signal_price = self.signal_price_long if position_side == "LONG" else self.signal_price_short
+
+                # Calculer la quantité du signal (hedge_quantity / HEDGE_QUANTITY_MULTIPLIER)
+                hedge_multiplier = self.config.get("HEDGE_QUANTITY_MULTIPLIER", 2)
+                signal_quantity = hedge_quantity / hedge_multiplier
+
+                if signal_price:
+                    update_success = self._update_tp_signal_after_hedge(
+                        position_side, symbol, signal_price, distance, signal_quantity
+                    )
+                    if update_success:
+                        self.logger.info(f"✅ TP signal {position_side} mis à jour avec nouveau ratio")
+                    else:
+                        self.logger.warning(f"⚠️ Échec mise à jour TP signal {position_side}")
+
+                # 2. Créer TP hedge avec nouveau ratio RR asymétrique (1.5RR par défaut)
+                self._create_tp_hedge_order(position_side, symbol, hedge_quantity, hedge_price, distance)
+
+                self.logger.info(f"✅ Système ONE_OR_MORE ASYMÉTRIQUE complet: TP signal (0.5RR) + TP hedge (1.5RR)")
+            else:
+                self.logger.info(f"🛡️ Hedge {position_side} exécuté - Mode SYMÉTRIQUE: Création TP hedge uniquement")
+
+                # Mode symétrique: Créer uniquement TP hedge avec RR_RATIO standard (1.0RR)
+                # TP signal garde son ratio initial (1.0RR), pas de mise à jour
+                self._create_tp_hedge_order(position_side, symbol, hedge_quantity, hedge_price, distance)
+
+                self.logger.info(f"✅ Système ONE_OR_MORE SYMÉTRIQUE complet: TP signal (1.0RR) + TP hedge (1.0RR)")
 
         except Exception as e:
             self.logger.error(f"Erreur traitement hedge execution: {e}", exc_info=True)
@@ -590,32 +758,44 @@ class OneOrMoreService:
                               hedge_price: float, distance: float) -> None:
         """Crée l'ordre TP hedge après exécution hedge"""
         try:
-            # Calculer prix TP hedge (1RR depuis hedge_price) avec offset de sécurité
-            safety_offset = hedge_price * self.config.get("TP_SAFETY_OFFSET_PERCENT", 0.0005)
+            # Vérifier si mode asymétrique est activé
+            asymmetric_tp_config = self.config.get("ASYMMETRIC_TP", {})
+            asymmetric_enabled = asymmetric_tp_config.get("ENABLED", True)
+
+            if asymmetric_enabled:
+                # Mode asymétrique: utiliser RR_RATIO_HEDGE_AFTER_HEDGE (1.5RR par défaut)
+                rr_ratio = float(asymmetric_tp_config.get("RR_RATIO_HEDGE_AFTER_HEDGE", 1.5))
+            else:
+                # Mode symétrique: utiliser RR_RATIO standard (1.0RR par défaut)
+                rr_ratio = float(self.config.get("RR_RATIO", 1.0))
+
+            # Calculer prix TP hedge avec ratio RR et offset de sécurité
+            safety_offset_percent = float(self.config.get("TP_SAFETY_OFFSET_PERCENT", 0.0005))
+            safety_offset = hedge_price * safety_offset_percent
 
             # Vérifier si la distance est trop petite (< 0.2% du prix hedge)
-            min_distance_percent = self.config.get("MIN_DISTANCE_PERCENT", 0.002)
+            min_distance_percent = float(self.config.get("MIN_DISTANCE_PERCENT", 0.002))
             min_distance_threshold = hedge_price * min_distance_percent
 
             small_distance_offset = 0.0
             if distance < min_distance_threshold:
                 # Distance trop petite, ajouter offset supplémentaire (calculé sur prix hedge)
-                small_distance_offset_percent = self.config.get("SMALL_DISTANCE_OFFSET_PERCENT", 0.0015)
+                small_distance_offset_percent = float(self.config.get("SMALL_DISTANCE_OFFSET_PERCENT", 0.0015))
                 small_distance_offset = hedge_price * small_distance_offset_percent
                 self.logger.info(f"⚡ Distance petite hedge ({distance:.6f} < {min_distance_threshold:.6f}) - Offset supplémentaire: {small_distance_offset:.6f}")
 
             if position_side == "LONG":
-                # Signal LONG → Hedge SHORT, TP hedge BUY plus bas quand distance petite
-                tp_hedge_price = hedge_price - distance - small_distance_offset + safety_offset
+                # Signal LONG → Hedge SHORT, TP hedge BUY = hedge_price - (distance * RR_RATIO)
+                tp_hedge_price = hedge_price - (distance * rr_ratio) - small_distance_offset + safety_offset
                 tp_side = "BUY"
                 tp_position_side = "SHORT"  # Fermer la position SHORT du hedge
             else:  # SHORT
-                # Signal SHORT → Hedge LONG, TP hedge SELL plus haut quand distance petite
-                tp_hedge_price = hedge_price + distance + small_distance_offset - safety_offset
+                # Signal SHORT → Hedge LONG, TP hedge SELL = hedge_price + (distance * RR_RATIO)
+                tp_hedge_price = hedge_price + (distance * rr_ratio) + small_distance_offset - safety_offset
                 tp_side = "SELL"
                 tp_position_side = "LONG"  # Fermer la position LONG du hedge
 
-            self.logger.info(f"TP hedge {position_side} calculé: {tp_hedge_price:.6f} (hedge: {hedge_price:.6f}, distance: {distance:.6f}, safety: {safety_offset:.6f}, small_dist: {small_distance_offset:.6f})")
+            self.logger.info(f"TP hedge {position_side} {rr_ratio}RR calculé: {tp_hedge_price:.6f} (hedge: {hedge_price:.6f}, distance: {distance:.6f}, RR: {rr_ratio}, safety: {safety_offset:.6f}, small_dist: {small_distance_offset:.6f})")
 
             # Formater le prix
             formatted_price = self._format_price_with_precision(tp_hedge_price, symbol)
