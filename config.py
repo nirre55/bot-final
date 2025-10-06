@@ -42,7 +42,7 @@ SIGNAL_CONFIG: Dict[str, Any] = {
 TRADING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MODE": "PERCENTAGE",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
     "INITIAL_QUANTITY": 1,  # Quantité de départ fixe (mode FIXED)
-    "BALANCE_PERCENTAGE": 0.03,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 3%
+    "BALANCE_PERCENTAGE": 0.01,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 1%
     "PROGRESSION_MODE": "STEP",  # "DOUBLE" (actuel) ou "STEP" (incrémentation par pas)
 }
 
