@@ -93,33 +93,16 @@ Action 1: UPDATE TP Signal (closer for security)
 Action 2: CREATE TP Hedge (farther for profit)
   New TP: 98.0 - (2.0 × 1.5) = 95.0 (1.5RR)
 
-Action 3: ACTIVATE 1RR Hedge Monitoring (if WAIT_HEDGE_1RR enabled)
-  Monitor price @ 96.0 (98.0 - 2.0 = hedge - distance)
-
-Result: TP Signal @ 101.0 + TP Hedge @ 95.0 + Monitoring 1RR @ 96.0
+Result: TP Signal @ 101.0 + TP Hedge @ 95.0
 ```
 
-**Phase 3A: Hedge 1RR reached FIRST (NEW FEATURE)**
+**Phase 3: One TP hits → Cross-stop**
 ```
-Price reaches 96.0 (1RR of hedge):
-  → Close signal LONG @ market (~96.0) - Loss: -4.0
-  → Cancel TP signal (no longer needed)
-  → Create STOP hedge @ 98.0098 (entry + 0.01% offset) - Breakeven protection
-  → TP hedge remains @ 95.0 (1.5RR)
-
-Result: Signal closed, Hedge protected with STOP @ breakeven + TP @ 1.5RR
-
-If TP Hedge @ 95.0 later hits:
-  → Profit: +6.0 (from 2x qty) = Net +2.0 total
-```
-
-**Phase 3B: One TP hits BEFORE 1RR (Classic behavior)**
-```
-If TP Signal @ 101.0 hits before 1RR:
+If TP Signal @ 101.0 hits:
   → Close signal (+1.0 profit = 0.5RR)
   → Create STOP to close hedge @ 98.0 (breakeven)
 
-If TP Hedge @ 95.0 hits before 1RR:
+If TP Hedge @ 95.0 hits:
   → Close hedge (+6.0 profit = 1.5RR from 2x qty)
   → Create STOP to close signal @ 100.0 (breakeven)
 ```
@@ -152,10 +135,6 @@ ONE_OR_MORE_CONFIG = {
         "END_HOUR": 21,                 # 9pm end
         "TIMEZONE": "America/New_York",
     },
-    "WAIT_HEDGE_1RR": {
-        "ENABLED": True,                # NEW: Enable hedge 1RR monitoring
-        "STOP_OFFSET_PERCENT": 0.0001,  # 0.01% offset for STOP after signal close
-    },
 }
 ```
 
@@ -181,44 +160,6 @@ Examples:
 - Signal at 4:00am → ⏰ Blocked (before 5am)
 - Signal at 20:30 → ✅ Executed (before 9pm)
 - Signal at 21:15 → ⏰ Blocked (after 9pm)
-
-### Wait Hedge 1RR Feature (NEW)
-
-**Advanced profit optimization** - When hedge reaches 1RR, automatically secure profits and let hedge run to 1.5RR.
-
-**How it works:**
-1. **Hedge executed** → Start monitoring price for hedge 1RR
-2. **Price reaches 1RR** → Close signal position at market + Create STOP for hedge at breakeven
-3. **Hedge continues** → Protected by STOP, can reach TP at 1.5RR
-
-**Benefits:**
-- ✅ **Improved RR**: Signal exits at 1RR instead of 0.5RR when hedge favored
-- ✅ **Breakeven protection**: STOP ensures hedge doesn't reverse back
-- ✅ **Higher profits**: Hedge can still reach 1.5RR for maximum profit
-- ✅ **Automatic**: No manual intervention required
-
-**Example LONG:**
-```
-Signal: 100.0, Hedge: 98.0, Distance: 2.0
-
-Normal flow (1RR not reached):
-  TP Signal @ 101.0 (0.5RR) or TP Hedge @ 95.0 (1.5RR)
-
-With 1RR feature (price reaches 96.0):
-  1. Close signal @ ~96.0 (loss -4.0)
-  2. STOP hedge @ 98.0098 (breakeven + 0.01%)
-  3. TP hedge @ 95.0 (1.5RR) still active
-  → If TP hits: +6.0 profit (2x qty) = Net +2.0 total
-```
-
-**Configuration:**
-- `ENABLED`: True/False to activate feature
-- `STOP_OFFSET_PERCENT`: Offset for breakeven STOP (default: 0.01%)
-
-**Monitoring:**
-- Uses candle close prices (optimal performance)
-- Checks on each closed candle via `update_candle_data()`
-- Real-time logging of 1RR monitoring status
 
 ## Signal Detection System
 
