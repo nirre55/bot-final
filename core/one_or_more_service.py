@@ -7,6 +7,8 @@ Responsabilité unique : Gestion stratégie ONE_OR_MORE avec hedge automatique e
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 import pytz
+import json
+import os
 import config  # type: ignore
 from core.logger import get_module_logger  # type: ignore
 from core.trading_service import TradingService  # type: ignore
@@ -59,6 +61,15 @@ class OneOrMoreService:
 
         # Historique des bougies pour calcul hedge levels
         self._candle_history: List[Dict[str, float]] = []
+
+        # Fichier JSON pour récupération de pertes
+        self._recovery_file_path = "loss_recovery.json"
+
+        # Montant de récupération actif (chargé depuis JSON)
+        self._recovery_amount: float = self._load_recovery_amount()
+
+        # Flag pour savoir si le cycle actuel est un cycle de récupération
+        self._is_recovery_cycle: bool = False
 
         # Initialiser l'historique des bougies
         self._initialize_candle_history()
@@ -144,6 +155,95 @@ class OneOrMoreService:
             # En cas d'erreur, autoriser le trading par sécurité
             return True
 
+    def _get_trade_quantity_with_recovery(self, symbol: str, signal_info: Dict[str, Any], hedge_price: float) -> Optional[str]:
+        """
+        Obtient la quantité de trading avec override FIXED mode si recovery est active
+
+        Args:
+            symbol: Symbole de trading
+            signal_info: Informations du signal
+            hedge_price: Prix du hedge calculé
+
+        Returns:
+            Quantité formatée ou None
+        """
+        try:
+            # Si pas de recovery active, utiliser la logique normale
+            if self._recovery_amount <= 0:
+                return self.trading_service.get_initial_trade_quantity(symbol, signal_info)
+
+            # Calculer d'abord la quantité en mode normal
+            normal_quantity_result = self.trading_service.get_initial_trade_quantity(symbol, signal_info)
+            if not normal_quantity_result:
+                self.logger.error("Impossible de calculer la quantité normale")
+                return None
+
+            # Calculer le montant de risque en mode normal
+            current_price = signal_info.get("current_price")
+            if not current_price:
+                self.logger.error("Prix actuel manquant")
+                return normal_quantity_result
+
+            # Distance au hedge
+            signal_type = signal_info.get("type", "").upper()
+            sl_offset = config.ONE_OR_MORE_CONFIG.get("SL_OFFSET_PERCENT", 0.00001)
+
+            if signal_type == "LONG":
+                hedge_with_offset = hedge_price * (1 - sl_offset)
+                distance = current_price - hedge_with_offset
+            else:  # SHORT
+                hedge_with_offset = hedge_price * (1 + sl_offset)
+                distance = hedge_with_offset - current_price
+
+            if distance <= 0:
+                self.logger.error("Distance au hedge invalide")
+                return normal_quantity_result
+
+            # Calculer le montant risqué en mode normal
+            normal_quantity_float = float(normal_quantity_result)
+            normal_risk_amount = normal_quantity_float * distance
+
+            self.logger.info(
+                f"💰 Mode normal: Qty={normal_quantity_float:.4f}, Distance={distance:.6f}, "
+                f"Risk={normal_risk_amount:.4f}$"
+            )
+
+            # NOUVELLE LOGIQUE: TOUJOURS additionner recovery + risque normal
+            total_risk_amount = self._recovery_amount + normal_risk_amount
+
+            self.logger.warning(
+                f"🔴 RECOVERY ACTIVE: Recovery ({self._recovery_amount:.4f}$) + Risque normal ({normal_risk_amount:.4f}$) "
+                f"→ ADDITION: {self._recovery_amount:.4f}$ + {normal_risk_amount:.4f}$ = {total_risk_amount:.4f}$"
+            )
+
+            # Sauvegarder le mode actuel
+            original_mode = config.TRADING_CONFIG["QUANTITY_MODE"]
+            original_quantity = config.TRADING_CONFIG.get("INITIAL_QUANTITY", 0)
+
+            # Calculer quantité avec recovery + risque normal: (recovery + normal_risk) / distance
+            combined_quantity = total_risk_amount / distance
+            self.logger.info(f"💡 Combined calc: {total_risk_amount:.4f} / {distance:.6f} = {combined_quantity}")
+
+            # Temporairement changer le mode et la quantité
+            config.TRADING_CONFIG["QUANTITY_MODE"] = "FIXED"
+            config.TRADING_CONFIG["INITIAL_QUANTITY"] = combined_quantity
+
+            # Obtenir la quantité formatée via le service
+            quantity_result = self.trading_service.get_initial_trade_quantity(symbol, signal_info)
+
+            # Restaurer le mode original
+            config.TRADING_CONFIG["QUANTITY_MODE"] = original_mode
+            config.TRADING_CONFIG["INITIAL_QUANTITY"] = original_quantity
+
+            if quantity_result:
+                self.logger.warning(f"🔴 Quantité combinée (recovery + normal) calculée: {quantity_result}")
+
+            return quantity_result
+
+        except Exception as e:
+            self.logger.error(f"Erreur _get_trade_quantity_with_recovery: {e}", exc_info=True)
+            return self.trading_service.get_initial_trade_quantity(symbol, signal_info)
+
     def execute_signal(self, signal_type: str, symbol: str, signal_info: Dict[str, Any]) -> bool:
         """
         Exécute un signal avec la logique ONE_OR_MORE
@@ -159,7 +259,12 @@ class OneOrMoreService:
         self.logger.info(f"🎯 Exécution signal ONE_OR_MORE {signal_type} pour {symbol}")
 
         try:
-            # 0. Vérifier la plage horaire de trading
+            # 0. Définir si c'est un cycle de récupération
+            self._is_recovery_cycle = (self._recovery_amount > 0)
+            if self._is_recovery_cycle:
+                self.logger.warning(f"🔴 DÉBUT CYCLE DE RÉCUPÉRATION: {self._recovery_amount:.4f}$")
+
+            # 1. Vérifier la plage horaire de trading
             if not self._is_within_trading_hours():
                 self.logger.warning(f"⏰ Signal {signal_type} bloqué: hors plage horaire de trading")
                 return False
@@ -170,8 +275,8 @@ class OneOrMoreService:
                 self.logger.error("❌ Impossible de calculer le prix hedge")
                 return False
 
-            # 2. Obtenir la quantité de trading
-            quantity_result = self.trading_service.get_initial_trade_quantity(symbol, signal_info)
+            # 2. Obtenir la quantité de trading (avec override recovery si activé)
+            quantity_result = self._get_trade_quantity_with_recovery(symbol, signal_info, hedge_price)
             if not quantity_result:
                 self.logger.error("❌ Impossible de calculer la quantité")
                 return False
@@ -985,6 +1090,11 @@ class OneOrMoreService:
 
             self.logger.info(f"🎯 TP signal {position_side} exécuté - FERMETURE COMPLÈTE système")
 
+            # Si c'est un cycle de récupération, on vérifiera le PNL après
+            if self._is_recovery_cycle:
+                self.logger.warning(f"🔵 Cycle de récupération terminé - Analyse PNL pour ajuster recovery...")
+                self._is_recovery_cycle = False
+
             # Fermer TOUTES les positions et ordres selon workflow
             self._close_all_positions_and_orders()
 
@@ -1006,6 +1116,11 @@ class OneOrMoreService:
                 return
 
             self.logger.info(f"🎯 TP hedge {position_side} exécuté - FERMETURE COMPLÈTE système")
+
+            # Si c'est un cycle de récupération, on vérifiera le PNL après
+            if self._is_recovery_cycle:
+                self.logger.warning(f"🔵 Cycle de récupération terminé - Analyse PNL pour ajuster recovery...")
+                self._is_recovery_cycle = False
 
             # Fermer TOUTES les positions et ordres selon workflow
             self._close_all_positions_and_orders()
@@ -1033,6 +1148,9 @@ class OneOrMoreService:
             self._reset_all_state()
 
             self.logger.info("✅ FERMETURE COMPLÈTE terminée - Système prêt pour nouveau signal")
+
+            # Vérifier si une récupération de pertes est nécessaire
+            self._check_loss_recovery_needed()
 
         except Exception as e:
             self.logger.error(f"Erreur fermeture complète: {e}", exc_info=True)
@@ -1381,3 +1499,157 @@ class OneOrMoreService:
 
         except Exception as e:
             self.logger.error(f"Erreur nettoyage OneOrMoreService: {e}", exc_info=True)
+
+    def _load_recovery_amount(self) -> float:
+        """
+        Charge le montant de récupération depuis le fichier JSON
+
+        Returns:
+            Montant à récupérer (0.0 si aucune récupération active)
+        """
+        try:
+            if os.path.exists(self._recovery_file_path):
+                with open(self._recovery_file_path, 'r') as f:
+                    data = json.load(f)
+                    recovery_amount = float(data.get("recovery_amount", 0.0))
+                    balance_max = float(data.get("balance_max", 0.0))
+
+                    if recovery_amount > 0:
+                        self.logger.info(
+                            f"📥 Recovery chargée: {recovery_amount:.4f}$ "
+                            f"(Balance max: {balance_max:.4f}$) depuis {self._recovery_file_path}"
+                        )
+                    return recovery_amount
+            return 0.0
+        except Exception as e:
+            self.logger.error(f"Erreur chargement recovery: {e}", exc_info=True)
+            return 0.0
+
+    def _save_recovery_data(self, recovery_amount: float, balance_max: float) -> None:
+        """
+        Sauvegarde les données de récupération dans le fichier JSON
+
+        Args:
+            recovery_amount: Montant à récupérer (0.0 pour reset)
+            balance_max: Balance maximale atteinte
+        """
+        try:
+            data = {
+                "recovery_amount": recovery_amount,
+                "balance_max": balance_max,
+                "timestamp": datetime.now().isoformat()
+            }
+            with open(self._recovery_file_path, 'w') as f:
+                json.dump(data, f, indent=2)
+
+            if recovery_amount > 0:
+                self.logger.info(
+                    f"💾 Recovery sauvegardée: {recovery_amount:.4f}$ "
+                    f"(Balance max: {balance_max:.4f}$) dans {self._recovery_file_path}"
+                )
+            else:
+                self.logger.info(
+                    f"💾 Recovery reset (0.0$, Balance max: {balance_max:.4f}$) "
+                    f"dans {self._recovery_file_path}"
+                )
+
+        except Exception as e:
+            self.logger.error(f"Erreur sauvegarde recovery: {e}", exc_info=True)
+
+    def _extract_quote_asset(self, symbol: str) -> str:
+        """
+        Extrait l'asset de cotation depuis le symbole
+
+        Args:
+            symbol: Symbole de trading (ex: LINKUSDC)
+
+        Returns:
+            Asset de cotation (ex: USDC)
+        """
+        # Liste des assets de cotation les plus communs
+        common_quote_assets = ['USDC', 'USDT', 'BUSD', 'DAI']
+
+        for quote_asset in common_quote_assets:
+            if symbol.endswith(quote_asset):
+                return quote_asset
+
+        # Fallback: USDT par défaut
+        self.logger.warning(f"Asset de cotation non identifié pour {symbol}, utilisation de USDT par défaut")
+        return 'USDT'
+
+    def _check_loss_recovery_needed(self) -> None:
+        """
+        Vérifie à la fin d'un cycle si une récupération de pertes est nécessaire
+        Basé sur la balance actuelle vs balance maximale
+        """
+        try:
+            # Vérifier si la feature est activée
+            loss_recovery_config = self.config.get("LOSS_RECOVERY", {})
+            if not loss_recovery_config.get("ENABLED", False):
+                self.logger.debug("🔍 LOSS_RECOVERY désactivé")
+                return
+
+            # Récupérer la balance actuelle du quote asset (USDC pour LINKUSDC)
+            account_balance = self.binance_client.get_account_balance()
+            if not account_balance:
+                self.logger.warning("⚠️ Impossible de récupérer la balance du compte, skip recovery check")
+                return
+
+            # Déterminer le quote asset depuis le symbol
+            symbol = config.SYMBOL
+            quote_asset = self._extract_quote_asset(symbol)
+
+            # Trouver la balance du quote asset
+            current_balance = 0.0
+            for balance_item in account_balance:
+                if balance_item.get("asset") == quote_asset:
+                    current_balance = float(balance_item.get("availableBalance", "0"))
+                    break
+
+            if current_balance <= 0:
+                self.logger.warning(f"⚠️ Balance {quote_asset} insuffisante ou non disponible, skip recovery check")
+                return
+
+            # Charger balance_max depuis JSON
+            balance_max = 0.0
+            if os.path.exists(self._recovery_file_path):
+                with open(self._recovery_file_path, 'r') as f:
+                    data = json.load(f)
+                    balance_max = float(data.get("balance_max", 0.0))
+
+            # Si balance_max n'existe pas encore, initialiser avec balance actuelle
+            if balance_max == 0.0:
+                self.logger.info(f"📊 Initialisation balance_max: {current_balance:.4f}$")
+                self._save_recovery_data(0.0, current_balance)
+                return
+
+            self.logger.info(f"📊 Balance actuelle: {current_balance:.4f}$ | Balance max: {balance_max:.4f}$")
+
+            # Cas 1: Balance actuelle > balance_max → Nouveau record, reset recovery
+            if current_balance > balance_max:
+                profit = current_balance - balance_max
+                self.logger.warning(
+                    f"✅ NOUVEAU RECORD: Balance {current_balance:.4f}$ > Max {balance_max:.4f}$ "
+                    f"(+{profit:.4f}$) → Recovery reset à 0$"
+                )
+                self._save_recovery_data(0.0, current_balance)
+                self._recovery_amount = 0.0
+                return
+
+            # Cas 2: Balance actuelle < balance_max → Perte à récupérer
+            if current_balance < balance_max:
+                recovery_amount = balance_max - current_balance
+                self.logger.warning(
+                    f"🔴 PERTE DÉTECTÉE: Balance {current_balance:.4f}$ < Max {balance_max:.4f}$ "
+                    f"→ Recovery: {recovery_amount:.4f}$"
+                )
+                self._save_recovery_data(recovery_amount, balance_max)
+                self._recovery_amount = recovery_amount
+                return
+
+            # Cas 3: Balance actuelle == balance_max → Aucun changement
+            self.logger.info(f"✅ Balance stable: {current_balance:.4f}$ = Max {balance_max:.4f}$")
+
+        except Exception as e:
+            self.logger.error(f"Erreur _check_loss_recovery_needed: {e}", exc_info=True)
+

@@ -42,7 +42,7 @@ SIGNAL_CONFIG: Dict[str, Any] = {
 TRADING_CONFIG: Dict[str, Any] = {
     "QUANTITY_MODE": "PERCENTAGE",  # "MINIMUM", "FIXED", ou "PERCENTAGE"
     "INITIAL_QUANTITY": 1,  # Quantité de départ fixe (mode FIXED)
-    "BALANCE_PERCENTAGE": 0.01,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 1%
+    "BALANCE_PERCENTAGE": 0.02,  # Pourcentage de la balance à risquer (mode PERCENTAGE) - 2%
     "PROGRESSION_MODE": "STEP",  # "DOUBLE" (actuel) ou "STEP" (incrémentation par pas)
 }
 
@@ -102,7 +102,7 @@ ONE_OR_MORE_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver la stratégie one or more
     "SL_LOOKBACK_CANDLES": 5,  # Nombre de bougies pour HIGH/LOW du hedge
     "SL_OFFSET_PERCENT": 0.00001,  # 0.001% offset pour hedge placement
-    "HEDGE_QUANTITY_MULTIPLIER": 2,  # Multiplicateur quantité hedge (2x)
+    "HEDGE_QUANTITY_MULTIPLIER": 1.3,  # Multiplicateur quantité hedge (1.3x)
     "RR_RATIO": 1.0,  # Ratio Risk-Reward initial pour TP signal (avant exécution hedge)
     "TP_SAFETY_OFFSET_PERCENT": 0.0002,  # 0.02% offset de sécurité pour éviter trigger immédiat des TP
     "MIN_DISTANCE_PERCENT": 0.002,  # 0.2% seuil minimum pour distance
@@ -117,6 +117,10 @@ ONE_OR_MORE_CONFIG: Dict[str, Any] = {
         "START_HOUR": 5,  # Heure de début (0-23) - 5h du matin
         "END_HOUR": 21,  # Heure de fin (0-23) - 21h (9pm)
         "TIMEZONE": "America/New_York",  # Fuseau horaire (ex: "America/New_York", "Europe/Paris", "UTC")
+    },
+    "LOSS_RECOVERY": {
+        "ENABLED": True,  # Activer/désactiver la récupération de pertes
+        "MAX_TIME_BETWEEN_TRADES": 30,  # Temps max entre 2 trades pour considérer récupération (secondes)
     },
 }
 

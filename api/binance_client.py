@@ -735,3 +735,91 @@ class BinanceAPIClient:
         except Exception as e:
             self.logger.error(f"Erreur lors de la fermeture du listen key: {e}", exc_info=True)
             return False
+
+    def get_account_trades(self, symbol: str, limit: int = 2) -> Optional[List[Dict[str, Any]]]:
+        """
+        Récupère les derniers trades du compte pour un symbole
+
+        Args:
+            symbol: Symbole de trading
+            limit: Nombre de trades à récupérer (défaut: 2)
+
+        Returns:
+            Liste des trades ou None si erreur
+        """
+        self.logger.debug(f"get_account_trades called for {symbol}, limit={limit}")
+
+        try:
+            endpoint = "/fapi/v1/userTrades"
+            timestamp = int(time.time() * 1000)
+
+            params = {
+                "symbol": symbol,
+                "limit": limit,
+                "timestamp": timestamp
+            }
+
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+
+            headers = {"X-MBX-APIKEY": self.api_key}
+
+            response = requests.get(f"{self.base_url}{endpoint}", headers=headers, params=params)
+
+            if response.status_code == 200:
+                trades = response.json()
+                self.logger.info(f"Trades récupérés: {len(trades)} trades pour {symbol}")
+                return trades
+            else:
+                self.logger.error(f"Erreur récupération trades: {response.status_code} - {response.text}")
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Erreur get_account_trades: {e}", exc_info=True)
+            return None
+
+    def get_income_history(self, symbol: str, income_type: str = "REALIZED_PNL", limit: int = 2) -> Optional[List[Dict[str, Any]]]:
+        """
+        Récupère l'historique des revenus (PNL réalisés) pour un symbole
+
+        Args:
+            symbol: Symbole de trading
+            income_type: Type de revenu (REALIZED_PNL par défaut)
+            limit: Nombre d'entrées à récupérer (défaut: 2)
+
+        Returns:
+            Liste des revenus ou None si erreur
+        """
+        self.logger.debug(f"get_income_history called for {symbol}, type={income_type}, limit={limit}")
+
+        try:
+            endpoint = "/fapi/v1/income"
+            timestamp = int(time.time() * 1000)
+
+            params = {
+                "symbol": symbol,
+                "incomeType": income_type,
+                "limit": limit,
+                "timestamp": timestamp
+            }
+
+            query_string = urlencode(params)
+            signature = self._generate_signature(query_string)
+            params["signature"] = signature
+
+            headers = {"X-MBX-APIKEY": self.api_key}
+
+            response = requests.get(f"{self.base_url}{endpoint}", headers=headers, params=params)
+
+            if response.status_code == 200:
+                income_list = response.json()
+                self.logger.info(f"Income récupéré: {len(income_list)} entrées PNL pour {symbol}")
+                return income_list
+            else:
+                self.logger.error(f"Erreur récupération income: {response.status_code} - {response.text}")
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Erreur get_income_history: {e}", exc_info=True)
+            return None

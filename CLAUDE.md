@@ -135,6 +135,10 @@ ONE_OR_MORE_CONFIG = {
         "END_HOUR": 21,                 # 9pm end
         "TIMEZONE": "America/New_York",
     },
+    "LOSS_RECOVERY": {
+        "ENABLED": True,                # NEW: Loss recovery system
+        "MAX_TIME_BETWEEN_TRADES": 30,  # Max 30 sec between 2 trades
+    },
 }
 ```
 
@@ -160,6 +164,107 @@ Examples:
 - Signal at 4:00am → ⏰ Blocked (before 5am)
 - Signal at 20:30 → ✅ Executed (before 9pm)
 - Signal at 21:15 → ⏰ Blocked (after 9pm)
+
+### Loss Recovery System (COMPLETE)
+
+**Automatic loss recovery** - Detects worst-case scenarios and automatically increases risk on next trade.
+
+**Trigger condition (worst case):**
+1. Hedge executed
+2. TP signal executed after hedge
+3. Result: Loss on cycle
+
+**How it works:**
+1. **End of cycle** → Fetch last 2 closed positions from Binance API (`/fapi/v1/income`)
+2. **Check timing** → If close time < 30 seconds apart
+3. **Calculate PNL** → Sum `income` (realized PNL) from both positions
+4. **If negative** → Store loss amount in `loss_recovery.json`
+5. **Next signal** → Override to FIXED mode with calculated quantity
+6. **Recovery success** → Reset to normal mode
+
+**Example workflow with accumulation:**
+```
+Cycle 1 (Loss):
+  Signal SHORT @ 23.29 (8.27 qty)
+  Hedge LONG @ 23.35 executed
+  TP Signal @ 23.27 executed
+  Trade1 PNL: -0.5$, Trade2 PNL: -2.5$
+  Total: -3.0$ → Recovery = 3.0$ (stored in JSON)
+
+Cycle 2 (Loss aussi):
+  Signal LONG @ 24.50 (normal qty)
+  Hedge SHORT @ 24.30 executed
+  TP Signal @ 24.52 executed
+  Trade1 PNL: -1.0$, Trade2 PNL: -1.5$
+  Total: -2.5$ → Recovery = 3.0 + 2.5 = 5.5$ ✅ ACCUMULATION
+
+Cycle 3 (Recovery partielle):
+  Signal SHORT @ 23.20
+  Hedge @ 23.40 (distance = 0.20)
+  Normal mode: 2% × 100$ = 2.0$ risk
+  Check: 2.0$ < 5.5$ → Recovery needed
+  Quantity: 5.5 / 0.20 = 27.5 (FIXED mode override)
+  TP hit → Profit +3.0$
+  Recovery: 5.5 - 3.0 = 2.5$ (reste à récupérer) 🟡
+
+Cycle 4 (Auto-reset si risque normal suffisant):
+  Signal LONG @ 24.60
+  Hedge @ 24.40 (distance = 0.20)
+  Normal mode: 2% × 100$ = 2.0$ risk
+  Check: 2.0$ < 0.3$ → FALSE! 2.0$ > 0.3$ ✅
+  → Auto-reset recovery à 0$ (pas besoin d'override)
+  Quantity: Normal (2.0$ risk via PERCENTAGE mode)
+
+Cycle 5 (Recovery complète):
+  Signal LONG @ 24.60
+  Hedge @ 24.40 (distance = 0.20)
+  Normal mode: 2% × 100$ = 2.0$ risk
+  Check: 2.0$ < 2.5$ → Recovery needed
+  Quantity: 2.5 / 0.20 = 12.5 (FIXED mode override)
+  TP hit → Profit +2.5$
+  Recovery: 2.5 - 2.5 = 0$ ✅ RESET COMPLET
+
+Cycle 6 (Normal):
+  Back to PERCENTAGE mode (3% risk)
+```
+
+**Configuration:**
+```python
+"LOSS_RECOVERY": {
+    "ENABLED": True,                    # Activate/deactivate recovery
+    "MAX_TIME_BETWEEN_TRADES": 30,     # Max seconds between trades
+}
+```
+
+**Implementation details:**
+- **API Endpoint**: `/fapi/v1/income` with `incomeType=REALIZED_PNL`
+- **Data Source**: Closed positions (not individual trades) for accurate PNL
+- **Grouping Logic**: Trades grouped by timestamp to consolidate positions
+- **Position Detection**: Handles partial fills (multiple trades per position)
+- **Storage**: `loss_recovery.json` file (auto-created)
+- **Loading**: Automatic on bot startup
+- **Accumulation**: Multiple consecutive losses are accumulated
+- **Partial recovery**: Profit deducted from recovery amount
+- **Complete recovery**: When recovery reaches 0$, back to normal mode
+- **Override logic**: `_get_trade_quantity_with_recovery()` method
+- **Fallback**: If recovery calculation fails, uses normal mode
+
+**Key Features:**
+- ✅ **Loss Accumulation**: 3$ + 2.5$ = 5.5$ total recovery
+- ✅ **Partial Recovery**: 5.5$ - 3.0$ = 2.5$ remaining
+- ✅ **Complete Recovery**: 2.5$ - 2.5$ = 0$ reset
+- ✅ **Auto Reset**: If normal risk ≥ recovery, auto-reset (no override needed)
+- ✅ **Persistent State**: Survives bot restarts via JSON
+- ✅ **Smart Quantity**: Always calculates exact amount needed
+
+**Current status:**
+- ✅ Detection implemented
+- ✅ PNL calculation working
+- ✅ JSON persistence working
+- ✅ FIXED mode override working
+- ✅ Loss accumulation working
+- ✅ Partial/complete recovery working
+- ⏳ Margin insufficient handling (divide by 2) - TODO
 
 ## Signal Detection System
 
