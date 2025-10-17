@@ -135,7 +135,7 @@ TP_CONFIG: Dict[str, Any] = {
 # Configuration du système de logging
 LOGGING_CONFIG: Dict[str, Any] = {
     "ENABLED": True,  # Activer/désactiver le logging
-    "LEVEL": "INFO",  # Niveau de log: DEBUG, INFO, WARNING, ERROR, CRITICAL
+    "LEVEL": "WARNING",  # Niveau de log: DEBUG, INFO, WARNING, ERROR, CRITICAL
     "FORMAT": "%(asctime)s | %(levelname)s | %(module)s.%(funcName)s | %(message)s",
     "DATE_FORMAT": "%Y-%m-%d %H:%M:%S",
     "FILE_LOGGING": {
