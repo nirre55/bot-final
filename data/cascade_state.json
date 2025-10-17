@@ -1,0 +1,36 @@
+{
+  "BTCUSDC_1756557844": {
+    "cascade_id": "BTCUSDC_1756557844",
+    "symbol": "BTCUSDC",
+    "initial_signal_side": "BUY",
+    "initial_order": {
+      "order_id": 24329156378,
+      "symbol": "BTCUSDC",
+      "side": "BUY",
+      "quantity": "0.001",
+      "stop_price": "0",
+      "position_side": "LONG",
+      "status": "filled",
+      "execution_price": "0.0",
+      "execution_time": 1756557844,
+      "cascade_level": 0
+    },
+    "hedge_order": {
+      "order_id": 24329164602,
+      "symbol": "BTCUSDC",
+      "side": "SELL",
+      "quantity": "0.002",
+      "stop_price": "108300.0",
+      "position_side": "SHORT",
+      "status": "filled",
+      "execution_price": "108300.0000",
+      "execution_time": 1756559280,
+      "cascade_level": 1
+    },
+    "cascade_orders": [],
+    "max_orders": 3,
+    "is_active": true,
+    "cycle_active": true,
+    "created_at": 1756557844
+  }
+}

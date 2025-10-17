@@ -212,9 +212,3 @@ temp/*
 
 # csv files
 *.csv
-
-# JSON files
-*.json
-
-# txt files
-*.txt
